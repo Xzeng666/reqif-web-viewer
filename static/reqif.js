@@ -1,0 +1,399 @@
+"use strict";
+
+const imageTypes = new Map(Object.entries({
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+  webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml", avif: "image/avif",
+}));
+const richTags = new Set(("p br b strong i em u s strike sub sup ol ul li table thead tbody " +
+  "tfoot tr td th caption colgroup col a hr span div pre code h1 h2 h3 h4 h5 h6 blockquote").split(" "));
+const blockedTags = new Set(("script style iframe embed applet form input button select textarea " +
+  "link meta base frame frameset noscript svg math head title").split(" "));
+const richStyles = new Set(("color background-color font-family font-size font-style font-weight " +
+  "text-align text-decoration white-space vertical-align border border-width border-color border-style " +
+  "border-collapse padding margin width height").split(" "));
+
+function child(element, name) {
+  return Array.from(element?.children ?? []).find(node =>
+    node.localName === name && node.namespaceURI === element.namespaceURI);
+}
+
+function ref(element, container, name) {
+  return child(child(element, container), name)?.textContent.trim() ?? "";
+}
+
+function decodeXml(bytes) {
+  let encoding = "utf-8";
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 60 && bytes[1] === 0)) {
+    encoding = "utf-16le";
+  } else if ((bytes[0] === 0xfe && bytes[1] === 0xff) || (bytes[0] === 0 && bytes[1] === 60)) {
+    encoding = "utf-16be";
+  } else {
+    const prefix = new TextDecoder().decode(bytes.subarray(0, 1024));
+    encoding = prefix.match(/^<\?xml\s+[^?]*?\bencoding\s*=\s*["']([^"']+)["']/i)?.[1] ?? encoding;
+  }
+  try {
+    return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("无法读取 ReqIF XML 的字符编码");
+  }
+}
+
+function normalizedPath(path) {
+  const parts = [];
+  for (const part of path.replaceAll("\\", "/").split("/")) {
+    if (part === "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function attachmentReader(archive, main, urls, missing) {
+  const exact = new Map();
+  const byName = new Map();
+  const cache = new Map();
+  if (archive) {
+    for (const entry of archive.entries.values()) {
+      if (entry === main) continue;
+      const path = normalizedPath(entry.name);
+      const name = path.split("/").pop();
+      exact.set(path, exact.has(path) ? null : entry);
+      byName.set(name, byName.has(name) ? null : entry);
+    }
+  }
+  const mainFolder = main?.name.replaceAll("\\", "/").split("/").slice(0, -1).join("/") ?? "";
+
+  return async function resolve(value, image) {
+    const source = value.trim();
+    if (image && /^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[a-z\d+/=\s]+$/i.test(source)) {
+      return { url: source, image: true };
+    }
+    if (!source || /^(?:[a-z][a-z0-9+.-]*:|[/\\]{2}|#)/i.test(source)) {
+      if (image && source) missing.add(source);
+      return null;
+    }
+    let path = source.split(/[?#]/, 1)[0];
+    try { path = decodeURIComponent(path); } catch {}
+    const name = normalizedPath(path).split("/").pop();
+    const entry = exact.get(normalizedPath(mainFolder + "/" + path)) ??
+      exact.get(normalizedPath(path)) ?? byName.get(name);
+    if (!entry) {
+      missing.add(source);
+      return null;
+    }
+    if (!cache.has(entry)) {
+      const bytes = await archive.read(entry);
+      cache.set(entry, { bytes });
+    }
+    const resource = cache.get(entry);
+    const type = imageTypes.get(name.split(".").pop().toLowerCase());
+    if (image && type) {
+      if (!resource.imageUrl) {
+        const blob = new Blob([resource.bytes], { type });
+        if (type === "image/svg+xml") {
+          // A standalone SVG must not inherit the viewer's origin.
+          resource.imageUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+          });
+        } else {
+          resource.imageUrl = URL.createObjectURL(blob);
+          urls.push(resource.imageUrl);
+        }
+      }
+      return { url: resource.imageUrl, image: true };
+    }
+    if (!resource.downloadUrl) {
+      resource.downloadUrl = URL.createObjectURL(new Blob([resource.bytes], { type: "application/octet-stream" }));
+      urls.push(resource.downloadUrl);
+    }
+    return { url: resource.downloadUrl, name };
+  };
+}
+
+async function cleanRich(source, target, resolve, issues) {
+  for (const node of source.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.CDATA_SECTION_NODE) {
+      target.append(node.nodeValue);
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) continue;
+    const tag = node.localName.toLowerCase();
+    if (blockedTags.has(tag)) {
+      issues.dropped++;
+      continue;
+    }
+    if (tag === "img" || tag === "object") {
+      const path = node.getAttribute(tag === "img" ? "src" : "data") ?? "";
+      const label = node.getAttribute("alt") || path.split(/[/\\]/).pop()?.slice(0, 60) || "附件";
+      const asset = await resolve(path, true);
+      const element = document.createElement(asset?.image ? "img" : asset ? "a" : "span");
+      if (asset?.image) {
+        element.src = asset.url;
+        element.alt = label;
+        for (const dimension of ["width", "height"]) {
+          const size = node.getAttribute(dimension);
+          if (/^\d{1,4}%?$/.test(size ?? "")) element.setAttribute(dimension, size);
+        }
+      } else if (asset) {
+        element.href = asset.url;
+        element.download = asset.name;
+        element.textContent = label;
+      } else {
+        element.className = "miss-attach";
+        element.textContent = "[缺失附件：" + label + "]";
+      }
+      target.append(element);
+      if (!asset && tag === "object") await cleanRich(node, target, resolve, issues);
+      continue;
+    }
+    if (!richTags.has(tag)) {
+      await cleanRich(node, target, resolve, issues);
+      continue;
+    }
+    const asset = tag === "a" ? await resolve(node.getAttribute("href") ?? "", false) : null;
+    const element = document.createElement(tag === "a" && !asset ? "span" : tag);
+    if (asset) {
+      element.href = asset.url;
+      element.download = asset.name;
+    }
+    const title = node.getAttribute("title");
+    if (title) element.title = title.slice(0, 200);
+    for (const attribute of ["colspan", "rowspan", "span"]) {
+      const value = node.getAttribute(attribute);
+      if (value && /^\d{1,4}$/.test(value)) element.setAttribute(attribute, value);
+    }
+    for (const declaration of (node.getAttribute("style") ?? "").split(";")) {
+      const colon = declaration.indexOf(":");
+      if (colon < 0) continue;
+      const property = declaration.slice(0, colon).trim().toLowerCase();
+      const value = declaration.slice(colon + 1).trim();
+      if (richStyles.has(property) && !/[\\()]/.test(value)) element.style.setProperty(property, value);
+    }
+    await cleanRich(node, element, resolve, issues);
+    target.append(element);
+  }
+}
+
+async function readReqif(file) {
+  if (!/\.reqifz?$/i.test(file.name)) throw new Error("仅支持 .reqif / .reqifz 文件");
+  if (file.size > 512 * 1024 * 1024) throw new Error("文件超过 512 MiB");
+  const archive = /\.reqifz$/i.test(file.name) ? await readZip(file) : null;
+  const documents = archive ? [...archive.entries.values()].filter(entry => /\.reqif$/i.test(entry.name)) : [];
+  if (archive && documents.length !== 1) {
+    throw new Error(documents.length ? "ReqIFz 包含多个 .reqif 文件" : "ReqIFz 中没有 .reqif 文件");
+  }
+  const main = documents[0];
+  if ((main?.size ?? file.size) > 200 * 1024 * 1024) throw new Error("ReqIF XML 超过 200 MiB");
+  const bytes = archive ? await archive.read(main) : new Uint8Array(await file.arrayBuffer());
+  const text = decodeXml(bytes);
+  if (/^\s*(?:<\?[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<!DOCTYPE\b/.test(text)) {
+    throw new Error("ReqIF 文件不能包含 DTD");
+  }
+  const xml = new DOMParser().parseFromString(text, "application/xml");
+  const root = xml.documentElement;
+  if (xml.doctype || root.localName !== "REQ-IF" ||
+      xml.getElementsByTagNameNS("http://www.mozilla.org/newlayout/xml/parsererror.xml", "parsererror").length) {
+    throw new Error("无法解析 ReqIF XML，请检查文件格式");
+  }
+
+  const urls = [];
+  const issues = { dropped: 0, missing: new Set() };
+  const resolve = attachmentReader(archive, main, urls, issues.missing);
+  try {
+    const model = await parseReqif(root, resolve, issues);
+    return {
+      ...model,
+      source: file.name,
+      attachments: archive ? archive.entries.size - 1 : 0,
+      dispose: () => urls.forEach(url => URL.revokeObjectURL(url)),
+    };
+  } catch (error) {
+    urls.forEach(url => URL.revokeObjectURL(url));
+    throw error;
+  }
+}
+
+async function parseReqif(root, resolve, issues) {
+  const elements = name => root.getElementsByTagNameNS(root.namespaceURI, name);
+  const typeNames = new Map(Array.from(elements("SPEC-OBJECT-TYPE"), node =>
+    [node.getAttribute("IDENTIFIER"), node.getAttribute("LONG-NAME") || ""]));
+  const enumLabels = new Map();
+  const datatypes = new Map();
+  for (const type of elements("DATATYPE-DEFINITION-ENUMERATION")) {
+    const values = Array.from(type.getElementsByTagNameNS(root.namespaceURI, "ENUM-VALUE"), node => {
+      const id = node.getAttribute("IDENTIFIER");
+      const label = node.getAttribute("LONG-NAME") || id;
+      enumLabels.set(id, label);
+      return label;
+    });
+    datatypes.set(type.getAttribute("IDENTIFIER"), values);
+  }
+
+  const definitions = new Map();
+  const filters = new Map();
+  for (const kind of ["string", "xhtml", "enumeration", "integer", "real", "boolean", "date"]) {
+    for (const node of elements("ATTRIBUTE-DEFINITION-" + kind.toUpperCase())) {
+      const name = node.getAttribute("LONG-NAME") || "(未命名属性)";
+      const values = datatypes.get(ref(node, "TYPE", "DATATYPE-DEFINITION-ENUMERATION-REF")) ?? [];
+      definitions.set(node.getAttribute("IDENTIFIER"), { name, kind });
+      if (!filters.has(name)) filters.set(name, { name, kind, values: new Set(), count: 0 });
+      values.forEach(value => filters.get(name).values.add(value));
+    }
+  }
+
+  const objects = new Map();
+  for (const node of elements("SPEC-OBJECT")) {
+    const rid = node.getAttribute("IDENTIFIER");
+    if (!rid) continue;
+    const type_name = typeNames.get(ref(node, "TYPE", "SPEC-OBJECT-TYPE-REF")) || "(未知类型)";
+    const attrs = [];
+    let title = "";
+    let wid = "";
+    let legacyId = "";
+    for (const value of child(node, "VALUES")?.children ?? []) {
+      if (!value.localName.startsWith("ATTRIBUTE-VALUE-") || value.namespaceURI !== root.namespaceURI) continue;
+      const suffix = value.localName.slice("ATTRIBUTE-VALUE-".length);
+      const definition = definitions.get(ref(value, "DEFINITION", "ATTRIBUTE-DEFINITION-" + suffix + "-REF"));
+      const { name, kind } = definition ?? { name: "(未知属性)", kind: suffix.toLowerCase() };
+      const raw = value.getAttribute("THE-VALUE")?.trim() ?? "";
+      if (definition) filters.get(name).count++;
+      if (kind === "xhtml") {
+        const content = child(value, "THE-VALUE");
+        const host = document.createElement("div");
+        if (content) await cleanRich(content, host, resolve, issues);
+        else host.textContent = raw;
+        attrs.push({ name, kind, value: host.textContent.replace(/\s+/g, " ").trim(), html: host.innerHTML });
+      } else if (kind === "enumeration") {
+        const ids = [...value.getElementsByTagNameNS(root.namespaceURI, "ENUM-VALUE-REF")]
+          .map(element => element.textContent.trim()).filter(Boolean);
+        if (raw) ids.unshift(raw);
+        const labels = [...new Set(ids)].map(id => enumLabels.get(id) || id);
+        attrs.push({ name, kind, value: labels.join(", "), labels });
+      } else {
+        attrs.push({ name, kind, value: raw });
+        if (name === "ReqIF.ChapterName") title = raw;
+        if (name === "ReqIF.ForeignID") wid ||= raw;
+        if (name === "ReqIF.ForignID") legacyId ||= raw;
+      }
+    }
+    wid ||= legacyId;
+    title ||= node.getAttribute("LONG-NAME") || "";
+    const searchText = [wid || rid, title, ...attrs.map(attribute => attribute.value)]
+      .map(value => value.toLowerCase());
+    objects.set(rid, { rid, wid, title, type_name, fallback: !wid, attrs, related: [], searchText });
+  }
+  if (!objects.size) throw new Error("ReqIF 中没有工作项（SPEC-OBJECT）");
+
+  let key = 0;
+  function hierarchy(holder, depth = 0) {
+    if (depth > 512) throw new Error("ReqIF 文档层级超过 512 层");
+    const nodes = [];
+    for (const node of holder?.children ?? []) {
+      if (node.localName !== "SPEC-HIERARCHY" || node.namespaceURI !== root.namespaceURI) continue;
+      const rid = ref(node, "OBJECT", "SPEC-OBJECT-REF");
+      const nodeKey = key++;
+      const children = hierarchy(child(node, "CHILDREN"), depth + 1);
+      const item = objects.get(rid);
+      if (item) nodes.push({ key: nodeKey, rid, wid: item.wid, title: item.title, type_name: item.type_name, children });
+      else nodes.push(...children);
+    }
+    return nodes;
+  }
+
+  const specs = Array.from(elements("SPECIFICATION"), node => ({
+    name: node.getAttribute("LONG-NAME") || "(未命名文档)",
+    tree: hierarchy(child(node, "CHILDREN")),
+  }));
+  const warnings = [];
+  if (!specs.length) {
+    const tree = Array.from(objects.values(), ({ rid, wid, title, type_name }) =>
+      ({ key: key++, rid, wid, title, type_name, children: [] }));
+    specs.push({ name: "全部工作项", tree });
+    warnings.push("文件不含规格层级，已按工作项列表展示");
+  }
+  const missingIds = [...objects.values()].filter(item => item.fallback).length;
+  if (missingIds) warnings.push(missingIds + " 个工作项使用内部标识");
+  if (issues.dropped) warnings.push("已移除 " + issues.dropped + " 个不支持的富文本元素");
+  if (issues.missing.size) warnings.push(issues.missing.size + " 个附件引用不可用");
+
+  let relations = 0;
+  for (const node of elements("SPEC-RELATION")) {
+    const source = ref(node, "SOURCE", "SPEC-OBJECT-REF");
+    const target = ref(node, "TARGET", "SPEC-OBJECT-REF");
+    if (!source || !target) continue;
+    const from = objects.get(source);
+    const to = objects.get(target);
+    from?.related.push({ dir: "out", rid: target });
+    if (source !== target) to?.related.push({ dir: "in", rid: source });
+    relations++;
+  }
+
+  const attrs = [...filters.values()].filter(attribute =>
+    attribute.count && attribute.name !== "ReqIF.Text").sort((a, b) => b.count - a.count)
+    .map(attribute => ({ ...attribute, values: [...attribute.values].sort() }));
+  return { objects, specs, attrs, relations, warnings };
+}
+
+function documentItems(model) {
+  const items = [];
+  let lastHeading = "";
+  let base = Infinity;
+  function walk(nodes, level) {
+    for (const node of nodes) {
+      const item = model.objects.get(node.rid);
+      const rich = item.attrs.filter(attribute => attribute.kind === "xhtml" && attribute.html.trim());
+      const html = rich.map(attribute => attribute.html).join("");
+      const heading = item.type_name.toLowerCase() === "heading";
+      items.push({
+        key: node.key, rid: item.rid, wid: item.wid, level,
+        kind: heading ? "heading" : html ? "text" : "plain",
+        title: item.title, caption: heading || item.title === lastHeading ? "" : item.title,
+        desc_html: html, desc_len: rich.reduce((total, attribute) => total + attribute.value.length, 0),
+      });
+      if (heading) {
+        lastHeading = item.title;
+        base = Math.min(base, level);
+      }
+      walk(node.children, level + 1);
+    }
+  }
+  model.specs.forEach(spec => walk(spec.tree, 1));
+  if (!Number.isFinite(base)) base = 1;
+  const counters = [];
+  for (const item of items) {
+    item.level = Math.max(1, item.level - base + 1);
+    if (item.kind !== "heading") continue;
+    const index = item.level - 1;
+    counters[index] = (counters[index] || 0) + 1;
+    counters.length = item.level;
+    item.num = Array.from(counters, value => value || 1).join(".");
+  }
+  return items;
+}
+
+function searchItems(model, query, filters) {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const active = filters.filter(filter => filter.value).map(filter => ({
+    ...filter, terms: filter.value.toLowerCase().split(/\s+/),
+  }));
+  return [...model.objects.values()].filter(item =>
+    (!terms.length || terms.some(term => item.searchText.some(text => text.includes(term)))) &&
+    active.every(filter => item.attrs.some(attribute => attribute.name === filter.attr &&
+      (filter.mode === "enum"
+        ? attribute.labels?.includes(filter.value)
+        : filter.terms.some(term => attribute.value.toLowerCase().includes(term))))));
+}
+
+function viewerStats(model) {
+  const counts = new Map();
+  for (const item of model.objects.values()) {
+    counts.set(item.type_name, (counts.get(item.type_name) || 0) + 1);
+  }
+  return {
+    source: model.source, objects: model.objects.size, specs: model.specs.length,
+    relations: model.relations, attachments: model.attachments,
+    types: Array.from(counts, ([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+  };
+}

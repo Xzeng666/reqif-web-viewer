@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src blob: data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>ReqIF Web Viewer</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./static/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">ReqIF Web Viewer</div>
+    <div class="fileinfo" id="fileInfo"></div>
+    <div id="filterBar" class="hidden">
+      <button id="addFilterBtn" class="btn" title="添加筛选条件">+ 筛选</button>
+      <div class="searchbox">
+        <input type="text" id="searchInput" placeholder="搜索 ID、标题或内容" aria-label="搜索工作项">
+        <button id="searchClear" class="hidden" title="清除搜索">×</button>
+      </div>
+      <div id="filterChips"></div>
+    </div>
+    <select id="viewSelect" class="view-select hidden" title="切换视图">
+      <option value="doc">文档</option>
+      <option value="workitem">工作项</option>
+    </select>
+    <button type="button" class="btn" id="btnOpen">打开文件</button>
+    <input type="file" id="fileInput" accept=".reqif,.reqifz" hidden>
+  </header>
+
+  <div id="fileMessage" role="status" class="hidden"></div>
+
+  <div id="welcome">
+    <div id="dropZone">
+      <div class="dz-icon">📄</div>
+      <h2>拖拽 ReqIF / ReqIFz 文件到此处</h2>
+      <p>也可点击「打开文件」选择本机文件。</p>
+      <p class="muted">文件在当前浏览器内处理。</p>
+    </div>
+  </div>
+
+  <main id="viewer" class="hidden">
+    <aside id="left">
+      <div id="leftHead">
+        <span id="leftTitle">目录树</span>
+        <button id="leftCollapse" title="收起侧栏">«</button>
+      </div>
+      <div id="searchResults" class="hidden"></div>
+      <nav id="tree"></nav>
+    </aside>
+    <div id="leftResizer" title="拖拽调整宽度"></div>
+    <div id="leftReveal" class="hidden" title="展开目录树">▶</div>
+    <section id="right">
+      <div id="detail" class="hidden"></div>
+      <div id="docWrap" class="hidden">
+        <div id="docScroll">
+          <div id="docSpacer"></div>
+          <div id="docEmpty" class="empty hidden">当前文件没有可显示的文档内容</div>
+        </div>
+        <aside id="docPanel" class="hidden">
+          <div id="docPanelHead" title="点击折叠/展开面板">
+            <span id="docPanelCaret" class="p-caret">▾</span>
+            <span id="docPanelTitle" class="p-title"></span>
+            <button id="docPanelClose" class="p-close" title="关闭面板">×</button>
+          </div>
+          <div id="docPanelBody"></div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer id="statusbar">
+    <button id="statBtn" title="点击查看详细统计">📊 <span id="statText">未导入文件</span></button>
+    <span id="statWarn" class="warn hidden" title=""></span>
+  </footer>
+
+  <div id="filterMenu" class="menu hidden"></div>
+  <div id="comboMenu" class="menu hidden"></div>
+
+  <div id="ctxMenu" class="hidden">
+    <div class="ctx-item" data-act="expand-all-tree">展开整棵目录树</div>
+    <div class="ctx-item" data-act="expand-subtree">展开该节点下全部层级</div>
+    <div class="ctx-item" data-act="expand-one">展开该节点的下一层</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" data-act="collapse-subtree">收起该节点下全部层级</div>
+    <div class="ctx-item" data-act="collapse-all-tree">收起整棵目录树</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" data-act="open-item">打开工作项详情</div>
+  </div>
+
+  <div id="statsModal" class="hidden">
+    <div id="statsBox">
+      <div id="statsHead">
+        <span>统计信息</span>
+        <button id="statsClose" title="关闭">×</button>
+      </div>
+      <div id="statsBody"></div>
+    </div>
+  </div>
+
+  <script src="./static/zip.js"></script>
+  <script src="./static/reqif.js"></script>
+  <script src="./static/app.js"></script>
+</body>
+</html>
