@@ -1,13 +1,16 @@
 
 "use strict";
 
-const STATE = { model: null, activeRid: null, activeKey: null, filters: [] };
+const STATE = {
+  model: null, spec: 0, activeRid: null, activeKey: null, filters: [],
+  locations: new Map(), occurrences: new Map(), positions: new Map(),
+};
 let view = "doc";
 let opening = false;
 
 const DOC = {
   loaded: false, items: [], heights: [], offs: [], total: 0,
-  rendered: new Map(), index: new Map(), scrollTop: 0,
+  rendered: new Map(), index: new Map(),
 };
 const BUFFER = 8;
 let rafPending = false;
@@ -59,7 +62,9 @@ async function openFile(file) {
 }
 
 function enterViewer(model) {
-  STATE.model?.dispose();
+  STATE.model?.assets.dispose();
+  STATE.spec = 0;
+  STATE.positions.clear();
   STATE.model = model;
   STATE.activeRid = null;
   STATE.activeKey = null;
@@ -69,8 +74,10 @@ function enterViewer(model) {
   $("fileInfo").title = model.source;
   $("filterChips").replaceChildren();
   $("searchInput").value = "";
-  $("detail").replaceChildren();
-  $("docPanelBody").replaceChildren();
+  clearContent($("detail"));
+  clearContent($("docPanelBody"));
+  $("searchMode").value = "all";
+  show("searchMode", false);
   $("docPanel").classList.remove("collapsed");
   for (const id of ["welcome", "docPanel", "filterMenu", "comboMenu", "ctxMenu", "statsModal",
     "searchResults", "searchClear", "detail"]) show(id, false);
@@ -83,13 +90,13 @@ function enterViewer(model) {
   $("statText").textContent = objects.size + " 个工作项 · " + specs.length + " 个规格" +
     (relations ? " · " + relations + " 个关联" : "") + (attachments ? " · " + attachments + " 个附件" : "");
   setWarn(model.warnings);
-  DOC.loaded = false;
-  DOC.items = [];
-  DOC.index.clear();
-  DOC.scrollTop = 0;
-  $("docSpacer").style.height = "0";
-  clearDocBlocks();
-  renderTree(model.specs);
+  $("specSelect").replaceChildren(...specs.map((spec, index) => new Option(spec.name, index)));
+  show("specPicker", specs.length > 1);
+  $("bodySelect").replaceChildren(new Option("自动识别", ""),
+    ...model.bodyFields.map(name => new Option(name, name)));
+  indexLocations(specs);
+  resetDocument();
+  renderTree(specs[0]);
   switchView($("viewSelect").value);
 }
 
@@ -106,30 +113,111 @@ function setWarn(warnings) {
 
 function initViewSwitch() {
   $("viewSelect").addEventListener("change", event => switchView(event.target.value));
+  $("specSelect").addEventListener("change", event => switchSpec(Number(event.target.value)));
+  $("bodySelect").addEventListener("change", () => {
+    rememberPosition();
+    resetDocument();
+    showDocument();
+  });
+}
+
+function indexLocations(specs) {
+  STATE.locations.clear();
+  STATE.occurrences.clear();
+  function walk(nodes, spec, parent) {
+    for (const node of nodes) {
+      const location = { node, spec, parent };
+      STATE.locations.set(node.key, location);
+      if (!STATE.occurrences.has(node.rid)) STATE.occurrences.set(node.rid, []);
+      STATE.occurrences.get(node.rid).push(location);
+      walk(node.children, spec, location);
+    }
+  }
+  specs.forEach((spec, index) => walk(spec.tree, index, null));
+}
+
+function locate(rid) {
+  const locations = STATE.occurrences.get(rid);
+  return locations?.find(location => location.spec === STATE.spec) ?? locations?.[0];
+}
+
+function locationPath(location, includeItem = true) {
+  const names = [];
+  let current = includeItem ? location : location.parent;
+  while (current) {
+    names.push(current.node.title || current.node.wid || current.node.rid);
+    current = current.parent;
+  }
+  names.push(STATE.model.specs[location.spec].name);
+  return names.reverse().join(" / ");
+}
+
+function updateLocation(key, unplaced = false) {
+  const location = STATE.locations.get(key);
+  const text = location ? locationPath(location) :
+    unplaced ? "未列入规格目录" : STATE.model.specs[STATE.spec].name;
+  const label = $("location");
+  label.textContent = text;
+  label.title = text;
+}
+
+function rememberPosition() {
+  if (view !== "doc" || !DOC.loaded || !DOC.items.length) return;
+  const top = $("docScroll").scrollTop;
+  const index = findIndex(top);
+  STATE.positions.set(STATE.spec, { key: DOC.items[index].key, offset: top - DOC.offs[index] });
+}
+
+function switchSpec(index) {
+  if (index === STATE.spec) return;
+  rememberPosition();
+  STATE.spec = index;
+  STATE.activeRid = null;
+  STATE.activeKey = null;
+  clearContent($("detail"));
+  clearContent($("docPanelBody"));
+  $("specSelect").value = index;
+  hideCtxMenu();
+  resetDocument();
+  renderTree(STATE.model.specs[index]);
+  switchView(view);
+  runQuery();
 }
 
 function switchView(next) {
   if (!STATE.model) return;
-  const scroll = $("docScroll");
-  if (view === "doc" && DOC.loaded) DOC.scrollTop = scroll.scrollTop;
+  if (next !== "doc") rememberPosition();
   view = next;
   const isDocument = view === "doc";
-  $("right").classList.toggle("docmode", isDocument);
   show("docWrap", isDocument);
   show("docPanel", false);
-  show("detail", !isDocument && !!STATE.activeRid);
-
+  show("bodyPicker", isDocument && STATE.model.bodyFields.length > 0);
+  show("detailScroll", !isDocument);
   if (isDocument) {
-    if (!DOC.loaded) buildDoc(documentItems(STATE.model));
-    else {
-      scroll.scrollTop = DOC.scrollTop;
-      const index = DOC.index.get(STATE.activeKey);
-      if (index === undefined) renderWindow();
-      else doJumpToIndex(index, false);
-    }
-  } else if (STATE.activeRid) {
-    renderDetail(STATE.model.objects.get(STATE.activeRid), STATE.activeRid);
+    showDocument();
+  } else {
+    show("detailEmpty", !STATE.activeRid);
+    show("detail", !!STATE.activeRid);
+    if (STATE.activeRid) renderDetail(STATE.model.objects.get(STATE.activeRid), STATE.activeRid);
+    else updateLocation(null);
   }
+}
+
+function showDocument() {
+  if (!DOC.loaded) buildDoc(documentItems(STATE.model, STATE.model.specs[STATE.spec], $("bodySelect").value));
+  const position = STATE.positions.get(STATE.spec);
+  const index = DOC.index.get(position?.key);
+  const scroll = $("docScroll");
+  if (index !== undefined) {
+    scroll.scrollTop = DOC.offs[index] + position.offset;
+    renderWindow();
+    scroll.scrollTop = DOC.offs[index] + Math.min(position.offset, DOC.heights[index] - 1);
+  } else {
+    const selected = DOC.index.get(STATE.activeKey);
+    if (selected !== undefined) doJumpToIndex(selected, false);
+    else scroll.scrollTop = 0;
+  }
+  renderWindow();
 }
 
 var leftHidden = false;
@@ -210,21 +298,14 @@ function doJumpToIndex(i, animate) {
   });
 }
 
-function renderTree(specs) {
+function renderTree(spec) {
   STATE.nodes = new Map();
-  STATE.firstNode = new Map();
   const host = $("tree");
   host.replaceChildren();
-  for (const spec of specs) {
-    const heading = document.createElement("div");
-    heading.className = "spec-name";
-    heading.textContent = spec.name;
-    host.appendChild(heading);
-    for (const node of spec.tree) host.appendChild(buildNode(node, 0, null));
-  }
+  for (const node of spec.tree) host.appendChild(buildNode(node, 0));
 }
 
-function buildNode(n, depth, parent) {
+function buildNode(n, depth) {
   var wrap = document.createElement("div");
   var row = document.createElement("div");
   row.className = "node-row";
@@ -266,12 +347,10 @@ function buildNode(n, depth, parent) {
   if (hasKids) {
     kids = document.createElement("div");
     kids.className = "node-children";
-    n.children.forEach(function (c) { kids.appendChild(buildNode(c, depth + 1, n.key)); });
+    n.children.forEach(function (c) { kids.appendChild(buildNode(c, depth + 1)); });
   }
 
-  STATE.nodes.set(n.key, { kids, caret, row, parent, children: n.children });
-  const first = STATE.firstNode.get(n.rid);
-  if (first === undefined || n.key < first) STATE.firstNode.set(n.rid, n.key);
+  STATE.nodes.set(n.key, { kids, caret, row, children: n.children });
   row.addEventListener("click", () => openItem(n.rid, n.key));
   caret.addEventListener("click", event => {
     event.stopPropagation();
@@ -357,15 +436,17 @@ function initCtxMenu() {
 function selectItem(rid, key) {
   STATE.activeRid = rid;
   STATE.activeKey = key;
-  let parent = STATE.nodes.get(key)?.parent;
-  while (parent != null) {
-    setExpand(parent, true);
-    parent = STATE.nodes.get(parent).parent;
+  let parent = STATE.locations.get(key)?.parent;
+  while (parent) {
+    setExpand(parent.node.key, true);
+    parent = parent.parent;
   }
   markActive(rid, key);
 }
 
-function openItem(rid, key = STATE.firstNode.get(rid)) {
+function openItem(rid, key = locate(rid)?.node.key) {
+  const location = STATE.locations.get(key);
+  if (location) switchSpec(location.spec);
   const index = DOC.index.get(key);
   if (view === "doc" && index !== undefined) {
     selectDocBlock(index, true);
@@ -380,8 +461,8 @@ function openItem(rid, key = STATE.firstNode.get(rid)) {
   }
 }
 
-function renderAttrsInto(d, it, skipText = false) {
-  var attrs = it.attrs.filter(function (a) { return a.kind !== "xhtml"; });
+function renderAttrsInto(d, it, body = []) {
+  const attrs = it.attrs.filter(attribute => attribute.kind !== "xhtml" && !body.includes(attribute));
   if (attrs.length) {
     var tbl = document.createElement("table");
     tbl.className = "attr-table";
@@ -397,17 +478,14 @@ function renderAttrsInto(d, it, skipText = false) {
     d.appendChild(tbl);
   }
 
-  const richAttrs = it.attrs.filter(a => a.kind === "xhtml" && a.html.trim() &&
-    !(skipText && a.name === "ReqIF.Text"));
+  const richAttrs = it.attrs.filter(attribute => attribute.kind === "xhtml" && attribute.html.trim() &&
+    !body.includes(attribute));
   richAttrs.forEach(function (a) {
     var h = document.createElement("div");
     h.className = "section-h";
     h.textContent = a.name;
     d.appendChild(h);
-    var box = document.createElement("div");
-    box.className = "rich";
-    box.innerHTML = a.html;
-    d.appendChild(box);
+    d.appendChild(renderBody(a));
   });
 
   if (it.related && it.related.length) {
@@ -440,8 +518,11 @@ function renderAttrsInto(d, it, skipText = false) {
 
 function renderDetail(it, rid) {
   show("detail", true);
-  var d = $("detail");
-  d.innerHTML = "";
+  show("detailEmpty", false);
+  updateLocation(STATE.activeKey, true);
+  $("detailScroll").scrollTop = 0;
+  const d = $("detail");
+  clearContent(d);
 
   var h1 = document.createElement("h1");
   if (!it) {
@@ -459,12 +540,82 @@ function renderDetail(it, rid) {
   d.appendChild(meta);
 
   renderAttrsInto(d, it);
-  $("right").scrollTop = 0;
 }
 
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+const imageObserver = new IntersectionObserver(entries => {
+  for (const { target, isIntersecting } of entries) {
+    if (!isIntersecting || !target.isConnected) continue;
+    imageObserver.unobserve(target);
+    loadImage(target);
+  }
+});
+
+async function loadImage(image) {
+  const assets = STATE.model.assets;
+  try {
+    const url = await assets.image(Number(image.dataset.image));
+    if (!image.isConnected || STATE.model.assets !== assets) return;
+    image.src = url;
+    await image.decode();
+  } catch {
+    if (image.isConnected) {
+      const notice = document.createElement("span");
+      notice.className = "miss-attach";
+      notice.textContent = "无法预览 " + image.alt;
+      image.replaceWith(notice);
+    }
+  }
+}
+
+function unobserveImages(container) {
+  for (const image of container.querySelectorAll("[data-image]")) imageObserver.unobserve(image);
+}
+
+function clearContent(container) {
+  unobserveImages(container);
+  container.replaceChildren();
+}
+
+function renderBody(attribute) {
+  const block = document.createElement("div");
+  if (attribute.kind === "xhtml") {
+    block.className = "rich";
+    block.innerHTML = attribute.html;
+    for (const image of block.querySelectorAll("[data-image]")) imageObserver.observe(image);
+  } else {
+    block.className = "plain-body";
+    block.textContent = attribute.value;
+  }
+  return block;
+}
+
+async function downloadAttachment(event) {
+  const button = event.target.closest("button[data-download]");
+  if (!button || button.disabled) return;
+  const assets = STATE.model.assets;
+  button.classList.remove("download-error");
+  button.disabled = true;
+  try {
+    const { blob, name } = await assets.download(Number(button.dataset.download));
+    if (STATE.model.assets !== assets) return;
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch {
+    button.classList.add("download-error");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 const docObserver = new ResizeObserver(entries => {
@@ -474,48 +625,31 @@ const docObserver = new ResizeObserver(entries => {
   }
 });
 
-function clearDocBlocks() {
+function resetDocument() {
+  DOC.loaded = false;
+  DOC.items = [];
+  DOC.index.clear();
   docObserver.disconnect();
-  DOC.rendered.forEach(element => element.remove());
   DOC.rendered.clear();
+  clearContent($("docSpacer"));
+  $("docSpacer").style.height = "0";
 }
 
 function buildDoc(items) {
   DOC.loaded = true;
   DOC.items = items;
   DOC.index = new Map(items.map((item, index) => [item.key, index]));
-  clearDocBlocks();
-  DOC.scrollTop = 0;
-
-  var n = items.length;
-  DOC.heights = new Array(n);
-  DOC.offs = new Array(n + 1);
-  DOC.offs[0] = 0;
-  for (var i = 0; i < n; i++) {
-    DOC.heights[i] = estimateHeight(items[i]);
-    DOC.offs[i + 1] = DOC.offs[i] + DOC.heights[i];
-  }
-  DOC.total = DOC.offs[n];
+  DOC.heights = items.map(estimateHeight);
+  DOC.offs = [0];
+  for (const height of DOC.heights) DOC.offs.push(DOC.offs[DOC.offs.length - 1] + height);
+  DOC.total = DOC.offs[items.length];
   $("docSpacer").style.height = DOC.total + "px";
-  $("docScroll").scrollTop = 0;
-  show("docEmpty", !n);
-  if (!n) return;
-  renderWindow();
-  const selected = DOC.index.get(STATE.activeKey);
-  if (selected !== undefined) {
-    doJumpToIndex(selected, false);
-    return;
-  }
-  const firstText = items.findIndex(item => item.kind === "text");
-  const scroll = $("docScroll");
-  if (firstText >= 0 && DOC.offs[firstText] > scroll.clientHeight * 0.6) {
-    doJumpToIndex(firstText, false);
-  }
+  show("docEmpty", !items.length);
 }
 
 function estimateHeight(it) {
-  if (!it.desc_len) return 56;
-  var lines = Math.ceil(it.desc_len / 60);
+  if (!it.length) return 56;
+  var lines = Math.ceil(it.length / 60);
   return 60 + lines * 24;
 }
 
@@ -529,7 +663,11 @@ function findIndex(y) {
 }
 
 function renderWindow() {
-  if (!DOC.loaded || !DOC.items.length) return;
+  if (!DOC.loaded) return;
+  if (!DOC.items.length) {
+    updateLocation(null);
+    return;
+  }
   var sc = $("docScroll");
   var st = sc.scrollTop, vh = sc.clientHeight;
   var start = Math.max(0, findIndex(st) - BUFFER);
@@ -538,6 +676,7 @@ function renderWindow() {
   DOC.rendered.forEach(function (el, k) {
     if (k < start || k > end) {
       docObserver.unobserve(el);
+      unobserveImages(el);
       el.remove();
       DOC.rendered.delete(k);
     }
@@ -553,6 +692,7 @@ function renderWindow() {
       docObserver.observe(el);
     }
   }
+  updateLocation(DOC.items[findIndex(sc.scrollTop)]?.key);
 }
 
 function makeBlock(i) {
@@ -609,14 +749,9 @@ function makeBlock(i) {
     }
   }
 
-  if (it.desc_html && it.desc_html.trim()) {
-    var body = document.createElement("div");
-    body.className = "rich";
-    body.innerHTML = it.desc_html;
-    el.appendChild(body);
-  }
+  for (const attribute of it.body) el.appendChild(renderBody(attribute));
   el.addEventListener("click", event => {
-    if (!event.target.closest("a")) selectDocBlock(i);
+    if (!event.target.closest("button")) selectDocBlock(i);
   });
   return el;
 }
@@ -658,8 +793,8 @@ function selectDocBlock(index, fromTree) {
   show("docPanel", true);
   $("docPanelTitle").textContent = [item.num, item.wid || item.rid, item.title].filter(Boolean).join(" ");
   const body = $("docPanelBody");
-  body.replaceChildren();
-  renderAttrsInto(body, STATE.model.objects.get(item.rid), true);
+  clearContent(body);
+  renderAttrsInto(body, STATE.model.objects.get(item.rid), item.body);
   body.scrollTop = 0;
 }
 
@@ -677,16 +812,20 @@ function initDocPanel() {
 var filterTimer = null;
 
 function initSearch() {
-  var input = $("searchInput");
-  input.addEventListener("input", function () {
-    var q = input.value.trim();
-    show("searchClear", !!q);
+  const input = $("searchInput");
+  input.addEventListener("input", () => {
+    const query = input.value.trim();
+    show("searchClear", !!query);
+    show("searchMode", /\s/.test(query));
     scheduleFilterQuery();
   });
-  $("searchClear").addEventListener("click", function () {
+  $("searchMode").addEventListener("change", runQuery);
+  $("searchClear").addEventListener("click", () => {
     input.value = "";
     show("searchClear", false);
+    show("searchMode", false);
     runQuery();
+    input.focus();
   });
 }
 
@@ -703,38 +842,71 @@ function runQuery() {
     show("tree", true);
     return;
   }
-  renderResults(searchItems(STATE.model, query, STATE.filters));
+  renderResults(searchItems(STATE.model, query, STATE.filters, $("searchMode").value), query);
 }
 
-function renderResults(items) {
-  var box = $("searchResults");
-  box.innerHTML = "";
+function resultExcerpt(text, pattern) {
+  const value = text.replace(/\s+/g, " ").trim();
+  const match = value.matchAll(pattern).next().value;
+  const start = Math.max(0, (match?.index ?? 0) - 36);
+  const end = Math.min(value.length, Math.max(start + 110, (match?.index ?? 0) + (match?.[0].length ?? 0)));
+  const excerpt = value.slice(start, end);
+  const span = document.createElement("span");
+  let position = 0;
+  if (start) span.append("…");
+  for (const hit of excerpt.matchAll(pattern)) {
+    const mark = document.createElement("mark");
+    mark.textContent = hit[0];
+    span.append(excerpt.slice(position, hit.index), mark);
+    position = hit.index + hit[0].length;
+  }
+  span.append(excerpt.slice(position));
+  if (end < value.length) span.append("…");
+  return span;
+}
+
+function renderResults(items, query) {
+  const box = $("searchResults");
+  const list = document.createDocumentFragment();
+  const summary = document.createElement("div");
+  summary.className = "result-count";
+  summary.textContent = items.length ? "匹配 " + items.length + " 项" : "没有匹配的工作项";
+  list.append(summary);
+  const terms = query.split(/\s+/).filter(Boolean).sort((a, b) => b.length - a.length);
+  const pattern = terms.length ? new RegExp(terms.map(term =>
+    term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu") : null;
+
+  for (const { item, match } of items) {
+    const location = locate(item.rid);
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "node-row result-row" + (item.rid === STATE.activeRid ? " active" : "");
+    row.dataset.rid = item.rid;
+    const id = document.createElement("span");
+    id.className = "wid";
+    id.textContent = item.wid || item.rid;
+    const title = document.createElement("span");
+    title.className = "res-title";
+    title.textContent = item.title || "（无标题）";
+    const path = document.createElement("span");
+    path.className = "result-path";
+    path.textContent = location ? locationPath(location, false) : "未列入规格目录";
+    path.title = path.textContent;
+    row.append(id, title, path);
+    if (match) {
+      const snippet = document.createElement("span");
+      snippet.className = "result-snippet";
+      const field = document.createElement("strong");
+      field.textContent = match.name + "　";
+      snippet.append(field, resultExcerpt(match.value, pattern));
+      row.append(snippet);
+    }
+    row.addEventListener("click", () => openItem(item.rid, location?.node.key));
+    list.append(row);
+  }
+  box.replaceChildren(list);
   show("tree", false);
   show("searchResults", true);
-  if (!items.length) {
-    box.innerHTML = '<div class="search-empty">没有匹配的工作项</div>';
-    return;
-  }
-  var head = document.createElement("div");
-  head.className = "search-empty";
-  head.style.padding = "6px";
-  head.textContent = "匹配 " + items.length + " 项";
-  box.appendChild(head);
-  items.forEach(function (it) {
-    var row = document.createElement("div");
-    row.className = "node-row" + (it.rid === STATE.activeRid ? " active" : "");
-    row.dataset.rid = it.rid;
-    var w = document.createElement("div");
-    w.className = "wid";
-    w.textContent = it.wid || ("内部:" + it.rid.slice(0, 13) + "…");
-    row.appendChild(w);
-    var t = document.createElement("div");
-    t.className = "res-title";
-    t.textContent = it.title || "(无标题)";
-    row.appendChild(t);
-    row.addEventListener("click", function () { openItem(it.rid); });
-    box.appendChild(row);
-  });
 }
 
 function initFilterBar() {
@@ -962,6 +1134,7 @@ function renderStats(s) {
 }
 
 initFileInput();
+$("right").addEventListener("click", downloadAttachment);
 initViewSwitch();
 initDocPanel();
 initCtxMenu();

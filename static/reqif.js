@@ -47,25 +47,28 @@ function normalizedPath(path) {
   return parts.join("/");
 }
 
-function attachmentReader(archive, main, urls, missing) {
+function attachmentReader(archive, main, missing) {
+  const entries = [];
   const exact = new Map();
   const byName = new Map();
-  const cache = new Map();
-  if (archive) {
-    for (const entry of archive.entries.values()) {
-      if (entry === main) continue;
-      const path = normalizedPath(entry.name);
-      const name = path.split("/").pop();
-      exact.set(path, exact.has(path) ? null : entry);
-      byName.set(name, byName.has(name) ? null : entry);
-    }
+  const images = new Map();
+  const urls = new Set();
+  let disposed = false;
+  for (const entry of archive?.entries.values() ?? []) {
+    if (entry === main) continue;
+    const path = normalizedPath(entry.name);
+    const name = path.split("/").pop();
+    const asset = { index: entries.length, name, entry, type: imageTypes.get(name.split(".").pop().toLowerCase()) };
+    entries.push(asset);
+    exact.set(path, exact.has(path) ? null : asset);
+    byName.set(name, byName.has(name) ? null : asset);
   }
   const mainFolder = main?.name.replaceAll("\\", "/").split("/").slice(0, -1).join("/") ?? "";
 
-  return async function resolve(value, image) {
+  function resolve(value, image) {
     const source = value.trim();
     if (image && /^data:image\/(?:png|jpeg|gif|webp|bmp|avif);base64,[a-z\d+/=\s]+$/i.test(source)) {
-      return { url: source, image: true };
+      return { url: source };
     }
     if (!source || /^(?:[a-z][a-z0-9+.-]*:|[/\\]{2}|#)/i.test(source)) {
       if (image && source) missing.add(source);
@@ -74,45 +77,50 @@ function attachmentReader(archive, main, urls, missing) {
     let path = source.split(/[?#]/, 1)[0];
     try { path = decodeURIComponent(path); } catch {}
     const name = normalizedPath(path).split("/").pop();
-    const entry = exact.get(normalizedPath(mainFolder + "/" + path)) ??
+    const asset = exact.get(normalizedPath(mainFolder + "/" + path)) ??
       exact.get(normalizedPath(path)) ?? byName.get(name);
-    if (!entry) {
-      missing.add(source);
-      return null;
+    if (!asset) missing.add(source);
+    return asset;
+  }
+
+  async function loadImage(asset) {
+    const blob = new Blob([await archive.read(asset.entry)], { type: asset.type });
+    if (disposed) return "";
+    if (asset.type === "image/svg+xml") {
+      // A standalone SVG must not inherit the viewer's origin.
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
     }
-    if (!cache.has(entry)) {
+    const url = URL.createObjectURL(blob);
+    urls.add(url);
+    return url;
+  }
+
+  return {
+    resolve,
+    image(index) {
+      if (!images.has(index)) images.set(index, loadImage(entries[index]));
+      return images.get(index);
+    },
+    async download(index) {
+      const { entry, name } = entries[index];
       const bytes = await archive.read(entry);
-      cache.set(entry, { bytes });
-    }
-    const resource = cache.get(entry);
-    const type = imageTypes.get(name.split(".").pop().toLowerCase());
-    if (image && type) {
-      if (!resource.imageUrl) {
-        const blob = new Blob([resource.bytes], { type });
-        if (type === "image/svg+xml") {
-          // A standalone SVG must not inherit the viewer's origin.
-          resource.imageUrl = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(reader.error);
-            reader.readAsDataURL(blob);
-          });
-        } else {
-          resource.imageUrl = URL.createObjectURL(blob);
-          urls.push(resource.imageUrl);
-        }
-      }
-      return { url: resource.imageUrl, image: true };
-    }
-    if (!resource.downloadUrl) {
-      resource.downloadUrl = URL.createObjectURL(new Blob([resource.bytes], { type: "application/octet-stream" }));
-      urls.push(resource.downloadUrl);
-    }
-    return { url: resource.downloadUrl, name };
+      return { blob: new Blob([bytes], { type: "application/octet-stream" }), name };
+    },
+    dispose() {
+      disposed = true;
+      urls.forEach(url => URL.revokeObjectURL(url));
+      urls.clear();
+      images.clear();
+    },
   };
 }
 
-async function cleanRich(source, target, resolve, issues) {
+function cleanRich(source, target, resolve, issues) {
   for (const node of source.childNodes) {
     if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.CDATA_SECTION_NODE) {
       target.append(node.nodeValue);
@@ -127,37 +135,40 @@ async function cleanRich(source, target, resolve, issues) {
     if (tag === "img" || tag === "object") {
       const path = node.getAttribute(tag === "img" ? "src" : "data") ?? "";
       const label = node.getAttribute("alt") || path.split(/[/\\]/).pop()?.slice(0, 60) || "附件";
-      const asset = await resolve(path, true);
-      const element = document.createElement(asset?.image ? "img" : asset ? "a" : "span");
-      if (asset?.image) {
-        element.src = asset.url;
+      const asset = resolve(path, true);
+      const preview = asset?.url || asset?.type;
+      const element = document.createElement(preview ? "img" : asset ? "button" : "span");
+      if (preview) {
         element.alt = label;
+        element.decoding = "async";
+        if (asset.url) {
+          element.loading = "lazy";
+          element.src = asset.url;
+        } else {
+          element.dataset.image = asset.index;
+        }
         for (const dimension of ["width", "height"]) {
           const size = node.getAttribute(dimension);
           if (/^\d{1,4}%?$/.test(size ?? "")) element.setAttribute(dimension, size);
         }
       } else if (asset) {
-        element.href = asset.url;
-        element.download = asset.name;
+        element.type = "button";
+        element.dataset.download = asset.index;
         element.textContent = label;
       } else {
         element.className = "miss-attach";
         element.textContent = "[缺失附件：" + label + "]";
       }
       target.append(element);
-      if (!asset && tag === "object") await cleanRich(node, target, resolve, issues);
+      if (!asset && tag === "object") cleanRich(node, target, resolve, issues);
       continue;
     }
     if (!richTags.has(tag)) {
-      await cleanRich(node, target, resolve, issues);
+      cleanRich(node, target, resolve, issues);
       continue;
     }
-    const asset = tag === "a" ? await resolve(node.getAttribute("href") ?? "", false) : null;
-    const element = document.createElement(tag === "a" && !asset ? "span" : tag);
-    if (asset) {
-      element.href = asset.url;
-      element.download = asset.name;
-    }
+    const asset = tag === "a" ? resolve(node.getAttribute("href") ?? "", false) : null;
+    const element = document.createElement(tag === "a" ? "span" : tag);
     const title = node.getAttribute("title");
     if (title) element.title = title.slice(0, 200);
     for (const attribute of ["colspan", "rowspan", "span"]) {
@@ -171,8 +182,19 @@ async function cleanRich(source, target, resolve, issues) {
       const value = declaration.slice(colon + 1).trim();
       if (richStyles.has(property) && !/[\\()]/.test(value)) element.style.setProperty(property, value);
     }
-    await cleanRich(node, element, resolve, issues);
-    target.append(element);
+    cleanRich(node, element, resolve, issues);
+    if (asset) {
+      const download = document.createElement("button");
+      download.type = "button";
+      download.dataset.download = asset.index;
+      if (element.querySelector("[data-download]")) download.textContent = element.textContent.trim() || asset.name;
+      else if (element.textContent.trim() || element.querySelector("img")) download.append(...element.childNodes);
+      else download.textContent = asset.name;
+      download.title = title || "下载 " + asset.name;
+      target.append(download);
+    } else {
+      target.append(element);
+    }
   }
 }
 
@@ -198,24 +220,17 @@ async function readReqif(file) {
     throw new Error("无法解析 ReqIF XML，请检查文件格式");
   }
 
-  const urls = [];
   const issues = { dropped: 0, missing: new Set() };
-  const resolve = attachmentReader(archive, main, urls, issues.missing);
-  try {
-    const model = await parseReqif(root, resolve, issues);
-    return {
-      ...model,
-      source: file.name,
-      attachments: archive ? archive.entries.size - 1 : 0,
-      dispose: () => urls.forEach(url => URL.revokeObjectURL(url)),
-    };
-  } catch (error) {
-    urls.forEach(url => URL.revokeObjectURL(url));
-    throw error;
-  }
+  const assets = attachmentReader(archive, main, issues.missing);
+  return {
+    ...parseReqif(root, assets.resolve, issues),
+    source: file.name,
+    attachments: archive ? archive.entries.size - 1 : 0,
+    assets,
+  };
 }
 
-async function parseReqif(root, resolve, issues) {
+function parseReqif(root, resolve, issues) {
   const elements = name => root.getElementsByTagNameNS(root.namespaceURI, name);
   const typeNames = new Map(Array.from(elements("SPEC-OBJECT-TYPE"), node =>
     [node.getAttribute("IDENTIFIER"), node.getAttribute("LONG-NAME") || ""]));
@@ -244,6 +259,7 @@ async function parseReqif(root, resolve, issues) {
   }
 
   const objects = new Map();
+  const bodyFields = new Set();
   for (const node of elements("SPEC-OBJECT")) {
     const rid = node.getAttribute("IDENTIFIER");
     if (!rid) continue;
@@ -262,7 +278,7 @@ async function parseReqif(root, resolve, issues) {
       if (kind === "xhtml") {
         const content = child(value, "THE-VALUE");
         const host = document.createElement("div");
-        if (content) await cleanRich(content, host, resolve, issues);
+        if (content) cleanRich(content, host, resolve, issues);
         else host.textContent = raw;
         attrs.push({ name, kind, value: host.textContent.replace(/\s+/g, " ").trim(), html: host.innerHTML });
       } else if (kind === "enumeration") {
@@ -280,9 +296,16 @@ async function parseReqif(root, resolve, issues) {
     }
     wid ||= legacyId;
     title ||= node.getAttribute("LONG-NAME") || "";
-    const searchText = [wid || rid, title, ...attrs.map(attribute => attribute.value)]
-      .map(value => value.toLowerCase());
-    objects.set(rid, { rid, wid, title, type_name, fallback: !wid, attrs, related: [], searchText });
+    for (const attribute of attrs) {
+      if (attribute.html?.trim() || (attribute.kind === "string" && attribute.value)) {
+        bodyFields.add(attribute.name);
+      }
+    }
+    const searchFields = [{ name: "工作项 ID", value: wid || rid }, { name: "标题", value: title }];
+    if (wid && wid !== rid) searchFields.push({ name: "内部标识", value: rid });
+    for (const { name, value } of attrs) if (value) searchFields.push({ name, value });
+    for (const field of searchFields) field.lower = field.value.toLowerCase();
+    objects.set(rid, { rid, wid, title, type_name, fallback: !wid, attrs, related: [], searchFields });
   }
   if (!objects.size) throw new Error("ReqIF 中没有工作项（SPEC-OBJECT）");
 
@@ -333,24 +356,38 @@ async function parseReqif(root, resolve, issues) {
   const attrs = [...filters.values()].filter(attribute =>
     attribute.count && attribute.name !== "ReqIF.Text").sort((a, b) => b.count - a.count)
     .map(attribute => ({ ...attribute, values: [...attribute.values].sort() }));
-  return { objects, specs, attrs, relations, warnings };
+  return { objects, specs, attrs, relations, warnings, bodyFields: [...bodyFields].sort() };
 }
 
-function documentItems(model) {
+const bodyNames = new Set([
+  "text", "description", "body", "requirementtext", "requirementdescription", "objecttext",
+  "正文", "描述", "需求正文", "需求描述", "内容", "需求内容",
+]);
+
+function bodyAttributes(item, field) {
+  return item.attrs.filter(attribute => {
+    if (field && attribute.name !== field) return false;
+    if (attribute.kind === "xhtml") return attribute.html.trim();
+    if (attribute.kind !== "string" || !attribute.value) return false;
+    const name = attribute.name.toLowerCase().replace(/^reqif[. _-]+/, "").replace(/[. _-]/g, "");
+    return field || bodyNames.has(name);
+  });
+}
+
+function documentItems(model, spec, field) {
   const items = [];
   let lastHeading = "";
   let base = Infinity;
   function walk(nodes, level) {
     for (const node of nodes) {
       const item = model.objects.get(node.rid);
-      const rich = item.attrs.filter(attribute => attribute.kind === "xhtml" && attribute.html.trim());
-      const html = rich.map(attribute => attribute.html).join("");
+      const body = bodyAttributes(item, field);
       const heading = item.type_name.toLowerCase() === "heading";
       items.push({
         key: node.key, rid: item.rid, wid: item.wid, level,
-        kind: heading ? "heading" : html ? "text" : "plain",
+        kind: heading ? "heading" : body.length ? "text" : "plain",
         title: item.title, caption: heading || item.title === lastHeading ? "" : item.title,
-        desc_html: html, desc_len: rich.reduce((total, attribute) => total + attribute.value.length, 0),
+        body, length: body.reduce((total, attribute) => total + attribute.value.length, 0),
       });
       if (heading) {
         lastHeading = item.title;
@@ -359,7 +396,7 @@ function documentItems(model) {
       walk(node.children, level + 1);
     }
   }
-  model.specs.forEach(spec => walk(spec.tree, 1));
+  walk(spec.tree, 1);
   if (!Number.isFinite(base)) base = 1;
   const counters = [];
   for (const item of items) {
@@ -373,17 +410,42 @@ function documentItems(model) {
   return items;
 }
 
-function searchItems(model, query, filters) {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+function searchItems(model, query, filters, mode) {
+  const lower = query.toLowerCase();
+  const terms = [...new Set(lower.split(/\s+/).filter(Boolean))];
   const active = filters.filter(filter => filter.value).map(filter => ({
     ...filter, terms: filter.value.toLowerCase().split(/\s+/),
   }));
-  return [...model.objects.values()].filter(item =>
-    (!terms.length || terms.some(term => item.searchText.some(text => text.includes(term)))) &&
-    active.every(filter => item.attrs.some(attribute => attribute.name === filter.attr &&
+  const exact = [];
+  const results = [];
+  for (const item of model.objects.values()) {
+    if (!active.every(filter => item.attrs.some(attribute => attribute.name === filter.attr &&
       (filter.mode === "enum"
         ? attribute.labels?.includes(filter.value)
-        : filter.terms.some(term => attribute.value.toLowerCase().includes(term))))));
+        : filter.terms.some(term => attribute.value.toLowerCase().includes(term)))))) continue;
+
+    let match = null;
+    if (terms.length) {
+      const matched = new Set();
+      let best = 0;
+      for (const field of item.searchFields) {
+        let count = 0;
+        for (const term of terms) {
+          if (!field.lower.includes(term)) continue;
+          matched.add(term);
+          count++;
+        }
+        if (count > best) {
+          match = field;
+          best = count;
+        }
+      }
+      if (!matched.size || (mode === "all" && matched.size < terms.length)) continue;
+    }
+    const group = lower && (item.wid.toLowerCase() === lower || item.rid.toLowerCase() === lower) ? exact : results;
+    group.push({ item, match });
+  }
+  return exact.concat(results);
 }
 
 function viewerStats(model) {
