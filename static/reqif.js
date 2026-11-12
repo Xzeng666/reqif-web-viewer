@@ -374,7 +374,7 @@ function bodyAttributes(item, field) {
   });
 }
 
-function documentItems(model, spec, field) {
+function documentItems(model, field) {
   const items = [];
   let lastHeading = "";
   let base = Infinity;
@@ -396,7 +396,7 @@ function documentItems(model, spec, field) {
       walk(node.children, level + 1);
     }
   }
-  walk(spec.tree, 1);
+  model.specs.forEach(spec => walk(spec.tree, 1));
   if (!Number.isFinite(base)) base = 1;
   const counters = [];
   for (const item of items) {

@@ -1,16 +1,13 @@
 
 "use strict";
 
-const STATE = {
-  model: null, spec: 0, activeRid: null, activeKey: null, filters: [],
-  locations: new Map(), occurrences: new Map(), positions: new Map(),
-};
+const STATE = { model: null, activeRid: null, activeKey: null, filters: [] };
 let view = "doc";
 let opening = false;
 
 const DOC = {
   loaded: false, items: [], heights: [], offs: [], total: 0,
-  rendered: new Map(), index: new Map(),
+  rendered: new Map(), index: new Map(), scrollTop: 0,
 };
 const BUFFER = 8;
 let rafPending = false;
@@ -63,8 +60,6 @@ async function openFile(file) {
 
 function enterViewer(model) {
   STATE.model?.assets.dispose();
-  STATE.spec = 0;
-  STATE.positions.clear();
   STATE.model = model;
   STATE.activeRid = null;
   STATE.activeKey = null;
@@ -90,13 +85,10 @@ function enterViewer(model) {
   $("statText").textContent = objects.size + " 个工作项 · " + specs.length + " 个规格" +
     (relations ? " · " + relations + " 个关联" : "") + (attachments ? " · " + attachments + " 个附件" : "");
   setWarn(model.warnings);
-  $("specSelect").replaceChildren(...specs.map((spec, index) => new Option(spec.name, index)));
-  show("specPicker", specs.length > 1);
   $("bodySelect").replaceChildren(new Option("自动识别", ""),
     ...model.bodyFields.map(name => new Option(name, name)));
-  indexLocations(specs);
   resetDocument();
-  renderTree(specs[0]);
+  renderTree(specs);
   switchView($("viewSelect").value);
 }
 
@@ -113,80 +105,22 @@ function setWarn(warnings) {
 
 function initViewSwitch() {
   $("viewSelect").addEventListener("change", event => switchView(event.target.value));
-  $("specSelect").addEventListener("change", event => switchSpec(Number(event.target.value)));
-  $("bodySelect").addEventListener("change", () => {
-    rememberPosition();
-    resetDocument();
-    showDocument();
-  });
+  $("bodySelect").addEventListener("change", refreshBody);
 }
 
-function indexLocations(specs) {
-  STATE.locations.clear();
-  STATE.occurrences.clear();
-  function walk(nodes, spec, parent) {
-    for (const node of nodes) {
-      const location = { node, spec, parent };
-      STATE.locations.set(node.key, location);
-      if (!STATE.occurrences.has(node.rid)) STATE.occurrences.set(node.rid, []);
-      STATE.occurrences.get(node.rid).push(location);
-      walk(node.children, spec, location);
-    }
-  }
-  specs.forEach((spec, index) => walk(spec.tree, index, null));
-}
-
-function locate(rid) {
-  const locations = STATE.occurrences.get(rid);
-  return locations?.find(location => location.spec === STATE.spec) ?? locations?.[0];
-}
-
-function locationPath(location, includeItem = true) {
+function locationPath(location) {
   const names = [];
-  let current = includeItem ? location : location.parent;
-  while (current) {
-    names.push(current.node.title || current.node.wid || current.node.rid);
-    current = current.parent;
+  for (let parent = location.parent; parent; parent = parent.parent) {
+    const { title, wid, rid } = parent.node;
+    names.push(title || wid || rid);
   }
-  names.push(STATE.model.specs[location.spec].name);
+  names.push(location.specName);
   return names.reverse().join(" / ");
-}
-
-function updateLocation(key, unplaced = false) {
-  const location = STATE.locations.get(key);
-  const text = location ? locationPath(location) :
-    unplaced ? "未列入规格目录" : STATE.model.specs[STATE.spec].name;
-  const label = $("location");
-  label.textContent = text;
-  label.title = text;
-}
-
-function rememberPosition() {
-  if (view !== "doc" || !DOC.loaded || !DOC.items.length) return;
-  const top = $("docScroll").scrollTop;
-  const index = findIndex(top);
-  STATE.positions.set(STATE.spec, { key: DOC.items[index].key, offset: top - DOC.offs[index] });
-}
-
-function switchSpec(index) {
-  if (index === STATE.spec) return;
-  rememberPosition();
-  STATE.spec = index;
-  STATE.activeRid = null;
-  STATE.activeKey = null;
-  clearContent($("detail"));
-  clearContent($("docPanelBody"));
-  $("specSelect").value = index;
-  hideCtxMenu();
-  resetDocument();
-  renderTree(STATE.model.specs[index]);
-  switchView(view);
-  runQuery();
 }
 
 function switchView(next) {
   if (!STATE.model) return;
-  if (next !== "doc") rememberPosition();
+  if (view === "doc" && DOC.loaded) DOC.scrollTop = $("docScroll").scrollTop;
   view = next;
   const isDocument = view === "doc";
   show("docWrap", isDocument);
@@ -199,23 +133,40 @@ function switchView(next) {
     show("detailEmpty", !STATE.activeRid);
     show("detail", !!STATE.activeRid);
     if (STATE.activeRid) renderDetail(STATE.model.objects.get(STATE.activeRid), STATE.activeRid);
-    else updateLocation(null);
   }
 }
 
 function showDocument() {
-  if (!DOC.loaded) buildDoc(documentItems(STATE.model, STATE.model.specs[STATE.spec], $("bodySelect").value));
-  const position = STATE.positions.get(STATE.spec);
-  const index = DOC.index.get(position?.key);
+  const firstOpen = !DOC.loaded;
+  if (firstOpen) buildDoc(documentItems(STATE.model, $("bodySelect").value));
   const scroll = $("docScroll");
-  if (index !== undefined) {
-    scroll.scrollTop = DOC.offs[index] + position.offset;
+  scroll.scrollTop = DOC.scrollTop;
+  const selected = DOC.index.get(STATE.activeKey);
+  if (selected !== undefined) {
+    doJumpToIndex(selected, false);
+    return;
+  }
+  renderWindow();
+  if (firstOpen) {
+    const firstText = DOC.items.findIndex(item => item.kind === "text");
+    if (firstText >= 0 && DOC.offs[firstText] > scroll.clientHeight * 0.6) {
+      doJumpToIndex(firstText, false);
+    }
+  }
+}
+
+function refreshBody() {
+  const scroll = $("docScroll");
+  const index = findIndex(scroll.scrollTop);
+  const key = DOC.items[index]?.key;
+  const offset = scroll.scrollTop - (DOC.offs[index] || 0);
+  resetDocument();
+  buildDoc(documentItems(STATE.model, $("bodySelect").value));
+  const anchor = DOC.index.get(key);
+  if (anchor !== undefined) {
+    scroll.scrollTop = DOC.offs[anchor] + offset;
     renderWindow();
-    scroll.scrollTop = DOC.offs[index] + Math.min(position.offset, DOC.heights[index] - 1);
-  } else {
-    const selected = DOC.index.get(STATE.activeKey);
-    if (selected !== undefined) doJumpToIndex(selected, false);
-    else scroll.scrollTop = 0;
+    scroll.scrollTop = DOC.offs[anchor] + Math.min(offset, DOC.heights[anchor] - 1);
   }
   renderWindow();
 }
@@ -298,14 +249,21 @@ function doJumpToIndex(i, animate) {
   });
 }
 
-function renderTree(spec) {
+function renderTree(specs) {
   STATE.nodes = new Map();
+  STATE.firstNode = new Map();
   const host = $("tree");
   host.replaceChildren();
-  for (const node of spec.tree) host.appendChild(buildNode(node, 0));
+  for (const spec of specs) {
+    const heading = document.createElement("div");
+    heading.className = "spec-name";
+    heading.textContent = spec.name;
+    host.appendChild(heading);
+    for (const node of spec.tree) host.appendChild(buildNode(node, 0, null, spec.name));
+  }
 }
 
-function buildNode(n, depth) {
+function buildNode(n, depth, parent, specName) {
   var wrap = document.createElement("div");
   var row = document.createElement("div");
   row.className = "node-row";
@@ -343,14 +301,14 @@ function buildNode(n, depth) {
 
   row.appendChild(label);
 
-  var kids = null;
-  if (hasKids) {
-    kids = document.createElement("div");
+  const kids = hasKids ? document.createElement("div") : null;
+  const entry = { node: n, parent, specName, kids, caret, row };
+  STATE.nodes.set(n.key, entry);
+  if (!STATE.firstNode.has(n.rid)) STATE.firstNode.set(n.rid, entry);
+  if (kids) {
     kids.className = "node-children";
-    n.children.forEach(function (c) { kids.appendChild(buildNode(c, depth + 1)); });
+    for (const child of n.children) kids.appendChild(buildNode(child, depth + 1, entry, specName));
   }
-
-  STATE.nodes.set(n.key, { kids, caret, row, children: n.children });
   row.addEventListener("click", () => openItem(n.rid, n.key));
   caret.addEventListener("click", event => {
     event.stopPropagation();
@@ -383,7 +341,7 @@ function setExpand(key, open, deep = false) {
   if (!node?.kids) return;
   node.kids.style.display = open ? "" : "none";
   node.caret.classList.toggle("open", open);
-  if (deep) node.children.forEach(child => setExpand(child.key, open, true));
+  if (deep) node.node.children.forEach(child => setExpand(child.key, open, true));
 }
 
 function showCtxMenu(x, y, key) {
@@ -436,7 +394,7 @@ function initCtxMenu() {
 function selectItem(rid, key) {
   STATE.activeRid = rid;
   STATE.activeKey = key;
-  let parent = STATE.locations.get(key)?.parent;
+  let parent = STATE.nodes.get(key)?.parent;
   while (parent) {
     setExpand(parent.node.key, true);
     parent = parent.parent;
@@ -444,9 +402,7 @@ function selectItem(rid, key) {
   markActive(rid, key);
 }
 
-function openItem(rid, key = locate(rid)?.node.key) {
-  const location = STATE.locations.get(key);
-  if (location) switchSpec(location.spec);
+function openItem(rid, key = STATE.firstNode.get(rid)?.node.key) {
   const index = DOC.index.get(key);
   if (view === "doc" && index !== undefined) {
     selectDocBlock(index, true);
@@ -519,7 +475,6 @@ function renderAttrsInto(d, it, body = []) {
 function renderDetail(it, rid) {
   show("detail", true);
   show("detailEmpty", false);
-  updateLocation(STATE.activeKey, true);
   $("detailScroll").scrollTop = 0;
   const d = $("detail");
   clearContent(d);
@@ -628,6 +583,7 @@ const docObserver = new ResizeObserver(entries => {
 function resetDocument() {
   DOC.loaded = false;
   DOC.items = [];
+  DOC.scrollTop = 0;
   DOC.index.clear();
   docObserver.disconnect();
   DOC.rendered.clear();
@@ -663,11 +619,7 @@ function findIndex(y) {
 }
 
 function renderWindow() {
-  if (!DOC.loaded) return;
-  if (!DOC.items.length) {
-    updateLocation(null);
-    return;
-  }
+  if (!DOC.loaded || !DOC.items.length) return;
   var sc = $("docScroll");
   var st = sc.scrollTop, vh = sc.clientHeight;
   var start = Math.max(0, findIndex(st) - BUFFER);
@@ -692,7 +644,6 @@ function renderWindow() {
       docObserver.observe(el);
     }
   }
-  updateLocation(DOC.items[findIndex(sc.scrollTop)]?.key);
 }
 
 function makeBlock(i) {
@@ -877,7 +828,7 @@ function renderResults(items, query) {
     term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu") : null;
 
   for (const { item, match } of items) {
-    const location = locate(item.rid);
+    const location = STATE.firstNode.get(item.rid);
     const row = document.createElement("button");
     row.type = "button";
     row.className = "node-row result-row" + (item.rid === STATE.activeRid ? " active" : "");
@@ -890,7 +841,7 @@ function renderResults(items, query) {
     title.textContent = item.title || "（无标题）";
     const path = document.createElement("span");
     path.className = "result-path";
-    path.textContent = location ? locationPath(location, false) : "未列入规格目录";
+    path.textContent = location ? locationPath(location) : "未列入规格目录";
     path.title = path.textContent;
     row.append(id, title, path);
     if (match) {
