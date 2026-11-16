@@ -26,10 +26,6 @@
 | `static/zip.js` | ReqIFz 解压与校验 |
 | `static/style.css` | 页面样式 |
 
-## 部署
-
-将源码推送到 GitHub。在仓库的 **Settings → Pages** 中选择 **Deploy from a branch**，设置为 `main` 和 `/(root)`。后续推送到 `main` 会触发发布。
-
 ## 许可证
 
 [MIT](LICENSE)
