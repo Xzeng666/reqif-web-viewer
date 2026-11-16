@@ -651,6 +651,7 @@ function makeBlock(i) {
   var el = document.createElement("div");
   var lv = Math.min(Math.max(it.level, 1), 6);
   el.className = "doc-block lvl" + lv + " kind-" + it.kind +
+    (it.docTitle ? " doc-title-block" : "") +
     (it.key === STATE.activeKey ? " active" : "");
   if (it.kind !== "heading" && lv > 1) {
     el.className += " indent" + (lv - 1);
@@ -671,7 +672,7 @@ function makeBlock(i) {
     t.textContent = it.title || "(无标题)";
     t.title = it.title || "";
     head.appendChild(t);
-    if (it.wid) {
+    if (it.wid && !it.docTitle) {
       var w = document.createElement("span");
       w.className = "doc-wid";
       w.textContent = it.wid;

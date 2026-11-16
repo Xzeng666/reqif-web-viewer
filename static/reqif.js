@@ -329,6 +329,26 @@ function parseReqif(root, resolve, issues) {
     name: node.getAttribute("LONG-NAME") || "(未命名文档)",
     tree: hierarchy(child(node, "CHILDREN")),
   }));
+  // Polarion 导出不包含文档标题工作项，仅保留为规格名；补一个标题 Heading。
+  specs.forEach((spec, index) => {
+    if (!spec.name || spec.name === "(未命名文档)") return;
+    const exists = (function has(nodes) {
+      return nodes.some(node => node.title === spec.name || has(node.children));
+    })(spec.tree);
+    if (exists) return;
+    let rid = "_doc-title-" + index;
+    while (objects.has(rid)) rid += "_";
+    objects.set(rid, {
+      rid, wid: "文档标题", title: spec.name, type_name: "Heading", fallback: false,
+      attrs: [], related: [],
+      searchFields: [
+        { name: "工作项 ID", value: "文档标题", lower: "文档标题" },
+        { name: "标题", value: spec.name, lower: spec.name.toLowerCase() },
+      ],
+    });
+    spec.tree = [{ key: key++, rid, wid: "文档标题", title: spec.name,
+      type_name: "Heading", docTitle: true, children: spec.tree }];
+  });
   const warnings = [];
   if (!specs.length) {
     const tree = Array.from(objects.values(), ({ rid, wid, title, type_name }) =>
@@ -381,6 +401,12 @@ function documentItems(model, field) {
   function walk(nodes, level) {
     for (const node of nodes) {
       const item = model.objects.get(node.rid);
+      if (node.docTitle) {
+        items.push({ key: node.key, rid: item.rid, wid: item.wid, level,
+          kind: "heading", title: item.title, caption: "", body: [], length: 0, docTitle: true });
+        walk(node.children, level);
+        continue;
+      }
       const body = bodyAttributes(item, field);
       const heading = item.type_name.toLowerCase() === "heading";
       items.push({
@@ -401,7 +427,7 @@ function documentItems(model, field) {
   const counters = [];
   for (const item of items) {
     item.level = Math.max(1, item.level - base + 1);
-    if (item.kind !== "heading") continue;
+    if (item.kind !== "heading" || item.docTitle) continue;
     const index = item.level - 1;
     counters[index] = (counters[index] || 0) + 1;
     counters.length = item.level;

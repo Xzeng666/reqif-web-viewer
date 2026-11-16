@@ -267,6 +267,9 @@ body {
 .lvl4 > .doc-head .doc-title, .lvl5 > .doc-head .doc-title,
 .lvl6 > .doc-head .doc-title { font-size: 14.5px; font-weight: 700; }
 .lvl1 { padding-top: 22px; }
+.doc-title-block { padding-top: 28px; padding-bottom: 16px; border-bottom: 1px solid #e6ebf0; }
+.doc-title-block > .doc-head { justify-content: center; }
+.doc-title-block > .doc-head .doc-title { font-size: 24px; text-align: center; white-space: normal; }
 .lvl2, .lvl3, .lvl4, .lvl5, .lvl6 { padding-top: 14px; }
 .kind-plain .doc-caption { color: #8b949e; font-weight: 500; }
 .doc-block.indent1 { padding-left: 50px; }
