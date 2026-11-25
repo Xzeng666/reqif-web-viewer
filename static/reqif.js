@@ -252,10 +252,42 @@ function parseReqif(root, resolve, issues) {
     for (const node of elements("ATTRIBUTE-DEFINITION-" + kind.toUpperCase())) {
       const name = node.getAttribute("LONG-NAME") || "(未命名属性)";
       const values = datatypes.get(ref(node, "TYPE", "DATATYPE-DEFINITION-ENUMERATION-REF")) ?? [];
-      definitions.set(node.getAttribute("IDENTIFIER"), { name, kind });
+      const id = node.getAttribute("IDENTIFIER");
+      definitions.set(id, { id, name, kind, defaultValue: child(node, "DEFAULT-VALUE")?.firstElementChild });
       if (!filters.has(name)) filters.set(name, { name, kind, values: new Set(), count: 0 });
       values.forEach(value => filters.get(name).values.add(value));
     }
+  }
+
+  const typeDefinitions = new Map();
+  for (const type of elements("SPEC-OBJECT-TYPE")) {
+    typeDefinitions.set(type.getAttribute("IDENTIFIER"),
+      Array.from(child(type, "SPEC-ATTRIBUTES")?.children ?? [], node =>
+        definitions.get(node.getAttribute("IDENTIFIER"))).filter(Boolean));
+  }
+
+  function readValue(value, definition, defaulted = false) {
+    const { id, name, kind } = definition ?? {
+      name: "(未知属性)", kind: value.localName.slice("ATTRIBUTE-VALUE-".length).toLowerCase(),
+    };
+    const raw = value.getAttribute("THE-VALUE") ?? "";
+    const attribute = { id, name, kind, value: raw, defaulted };
+    if (kind === "xhtml") {
+      const content = child(value, "THE-VALUE");
+      const host = document.createElement("div");
+      if (content) cleanRich(content, host, resolve, issues);
+      else host.textContent = raw;
+      attribute.text = host.textContent;
+      attribute.value = attribute.text.replace(/\s+/g, " ").trim();
+      attribute.html = host.innerHTML;
+    } else if (kind === "enumeration") {
+      const ids = [...value.getElementsByTagNameNS(root.namespaceURI, "ENUM-VALUE-REF")]
+        .map(element => element.textContent.trim()).filter(Boolean);
+      if (raw) ids.unshift(raw);
+      attribute.labels = [...new Set(ids)].map(id => enumLabels.get(id) || id);
+      attribute.value = attribute.labels.join(", ");
+    }
+    return attribute;
   }
 
   const objects = new Map();
@@ -263,36 +295,30 @@ function parseReqif(root, resolve, issues) {
   for (const node of elements("SPEC-OBJECT")) {
     const rid = node.getAttribute("IDENTIFIER");
     if (!rid) continue;
-    const type_name = typeNames.get(ref(node, "TYPE", "SPEC-OBJECT-TYPE-REF")) || "(未知类型)";
+    const typeId = ref(node, "TYPE", "SPEC-OBJECT-TYPE-REF");
+    const type_name = typeNames.get(typeId) || "(未知类型)";
     const attrs = [];
-    let title = "";
-    let wid = "";
-    let legacyId = "";
+    const explicit = new Set();
     for (const value of child(node, "VALUES")?.children ?? []) {
       if (!value.localName.startsWith("ATTRIBUTE-VALUE-") || value.namespaceURI !== root.namespaceURI) continue;
       const suffix = value.localName.slice("ATTRIBUTE-VALUE-".length);
-      const definition = definitions.get(ref(value, "DEFINITION", "ATTRIBUTE-DEFINITION-" + suffix + "-REF"));
-      const { name, kind } = definition ?? { name: "(未知属性)", kind: suffix.toLowerCase() };
-      const raw = value.getAttribute("THE-VALUE")?.trim() ?? "";
-      if (definition) filters.get(name).count++;
-      if (kind === "xhtml") {
-        const content = child(value, "THE-VALUE");
-        const host = document.createElement("div");
-        if (content) cleanRich(content, host, resolve, issues);
-        else host.textContent = raw;
-        attrs.push({ name, kind, value: host.textContent.replace(/\s+/g, " ").trim(), html: host.innerHTML });
-      } else if (kind === "enumeration") {
-        const ids = [...value.getElementsByTagNameNS(root.namespaceURI, "ENUM-VALUE-REF")]
-          .map(element => element.textContent.trim()).filter(Boolean);
-        if (raw) ids.unshift(raw);
-        const labels = [...new Set(ids)].map(id => enumLabels.get(id) || id);
-        attrs.push({ name, kind, value: labels.join(", "), labels });
-      } else {
-        attrs.push({ name, kind, value: raw });
-        if (name === "ReqIF.ChapterName") title = raw;
-        if (name === "ReqIF.ForeignID") wid ||= raw;
-        if (name === "ReqIF.ForignID") legacyId ||= raw;
+      const id = ref(value, "DEFINITION", "ATTRIBUTE-DEFINITION-" + suffix + "-REF");
+      explicit.add(id);
+      attrs.push(readValue(value, definitions.get(id)));
+    }
+    for (const definition of typeDefinitions.get(typeId) ?? []) {
+      if (definition.defaultValue && !explicit.has(definition.id)) {
+        attrs.push(readValue(definition.defaultValue, definition, true));
       }
+    }
+    let title = "";
+    let wid = "";
+    let legacyId = "";
+    for (const attribute of attrs) {
+      if (filters.has(attribute.name)) filters.get(attribute.name).count++;
+      if (attribute.name === "ReqIF.ChapterName") title = attribute.value;
+      if (attribute.name === "ReqIF.ForeignID") wid ||= attribute.value;
+      if (attribute.name === "ReqIF.ForignID") legacyId ||= attribute.value;
     }
     wid ||= legacyId;
     title ||= node.getAttribute("LONG-NAME") || "";
@@ -329,7 +355,7 @@ function parseReqif(root, resolve, issues) {
     name: node.getAttribute("LONG-NAME") || "(未命名文档)",
     tree: hierarchy(child(node, "CHILDREN")),
   }));
-  // Polarion 导出不包含文档标题工作项，仅保留为规格名；补一个标题 Heading。
+  const displayNodes = new Map();
   specs.forEach((spec, index) => {
     if (!spec.name || spec.name === "(未命名文档)") return;
     const exists = (function has(nodes) {
@@ -338,16 +364,13 @@ function parseReqif(root, resolve, issues) {
     if (exists) return;
     let rid = "_doc-title-" + index;
     while (objects.has(rid)) rid += "_";
-    objects.set(rid, {
-      rid, wid: "文档标题", title: spec.name, type_name: "Heading", fallback: false,
+    displayNodes.set(rid, {
+      rid, wid: "", title: spec.name, type_name: "文档标题", displayOnly: true,
       attrs: [], related: [],
-      searchFields: [
-        { name: "工作项 ID", value: "文档标题", lower: "文档标题" },
-        { name: "标题", value: spec.name, lower: spec.name.toLowerCase() },
-      ],
+      searchFields: [{ name: "文档标题", value: spec.name, lower: spec.name.toLowerCase() }],
     });
-    spec.tree = [{ key: key++, rid, wid: "文档标题", title: spec.name,
-      type_name: "Heading", docTitle: true, children: spec.tree }];
+    spec.tree = [{ key: key++, rid, wid: "", title: spec.name,
+      type_name: "文档标题", docTitle: true, children: spec.tree }];
   });
   const warnings = [];
   if (!specs.length) {
@@ -376,7 +399,7 @@ function parseReqif(root, resolve, issues) {
   const attrs = [...filters.values()].filter(attribute =>
     attribute.count && attribute.name !== "ReqIF.Text").sort((a, b) => b.count - a.count)
     .map(attribute => ({ ...attribute, values: [...attribute.values].sort() }));
-  return { objects, specs, attrs, relations, warnings, bodyFields: [...bodyFields].sort() };
+  return { objects, displayNodes, specs, attrs, relations, warnings, bodyFields: [...bodyFields].sort() };
 }
 
 const bodyNames = new Set([
@@ -400,13 +423,13 @@ function documentItems(model, field) {
   let base = Infinity;
   function walk(nodes, level) {
     for (const node of nodes) {
-      const item = model.objects.get(node.rid);
       if (node.docTitle) {
-        items.push({ key: node.key, rid: item.rid, wid: item.wid, level,
-          kind: "heading", title: item.title, caption: "", body: [], length: 0, docTitle: true });
+        items.push({ key: node.key, rid: node.rid, wid: "", level,
+          kind: "heading", title: node.title, caption: "", body: [], length: 0, docTitle: true });
         walk(node.children, level);
         continue;
       }
+      const item = model.objects.get(node.rid);
       const body = bodyAttributes(item, field);
       const heading = item.type_name.toLowerCase() === "heading";
       items.push({
@@ -444,7 +467,7 @@ function searchItems(model, query, filters, mode) {
   }));
   const exact = [];
   const results = [];
-  for (const item of model.objects.values()) {
+  for (const item of [...model.objects.values(), ...model.displayNodes.values()]) {
     if (!active.every(filter => item.attrs.some(attribute => attribute.name === filter.attr &&
       (filter.mode === "enum"
         ? attribute.labels?.includes(filter.value)

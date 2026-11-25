@@ -56,13 +56,21 @@
     <div id="leftResizer" title="拖拽调整宽度"></div>
     <div id="leftReveal" class="hidden" title="展开目录树">▶</div>
     <section id="right">
-      <label id="bodyPicker" class="hidden">正文
-        <select id="bodySelect"></select>
-      </label>
+      <div id="readerTools">
+        <label id="bodyPicker" class="hidden">正文
+          <select id="bodySelect"></select>
+        </label>
+        <div id="hitControls" class="hidden" aria-label="正文搜索定位">
+          <span id="hitCount" aria-live="polite"></span>
+          <button id="previousHit" type="button">上一处</button>
+          <button id="nextHit" type="button">下一处</button>
+        </div>
+      </div>
       <div id="detailScroll" class="hidden">
         <div id="detailEmpty" class="empty">从左侧选择工作项</div>
         <div id="detail" class="hidden"></div>
       </div>
+      <div id="detailTools" class="item-tools hidden"></div>
       <div id="docWrap" class="hidden">
         <div id="docScroll">
           <div id="docSpacer"></div>
@@ -75,6 +83,11 @@
             <button id="docPanelClose" class="p-close" title="关闭面板">×</button>
           </div>
           <div id="docPanelBody"></div>
+          <div id="docPanelTools" class="item-tools hidden">
+            <button id="attributeSettings" class="icon-button" type="button" title="属性设置" aria-label="属性设置">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3 1-2h4l1 2 2 1 2-.2 2 3.4-1.2 1.7V12l1.2 1.7-2 3.4-2-.2-2 1-1 2h-4l-1-2-2-1-2 .2-2-3.4L4.2 12V8.9L3 7.2l2-3.4 2 .2Z" transform="translate(0 1)"/><circle cx="12" cy="11.5" r="3"/></svg>
+            </button>
+          </div>
         </aside>
       </div>
     </section>
@@ -109,8 +122,37 @@
     </div>
   </div>
 
+  <dialog id="attributeDialog" aria-labelledby="attributeDialogTitle">
+    <div class="dialog-head">
+      <h2 id="attributeDialogTitle">显示字段</h2>
+      <button id="resetAttributes" type="button">恢复默认</button>
+      <button id="closeAttributes" class="icon-button dialog-close" type="button" title="关闭" aria-label="关闭属性设置">×</button>
+    </div>
+    <div id="attributeFields"></div>
+  </dialog>
+
+  <dialog id="mediaDialog" aria-labelledby="mediaTitle">
+    <div class="dialog-head">
+      <h2 id="mediaTitle"></h2>
+      <button id="closeMedia" class="icon-button dialog-close" type="button" title="关闭" aria-label="关闭图片预览">×</button>
+    </div>
+    <div id="mediaStage"></div>
+    <div id="imageTools" aria-label="图片缩放">
+      <button id="zoomOut" class="icon-button" type="button" title="缩小" aria-label="缩小图片">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 5 5M7 10h6"/></svg>
+      </button>
+      <span id="zoomLevel" aria-live="polite"></span>
+      <button id="zoomIn" class="icon-button" type="button" title="放大" aria-label="放大图片">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 5 5M7 10h6m-3-3v6"/></svg>
+      </button>
+    </div>
+  </dialog>
+
   <script src="./static/zip.js"></script>
   <script src="./static/reqif.js"></script>
+  <script src="./static/media.js"></script>
+  <script src="./static/search.js"></script>
+  <script src="./static/attributes.js"></script>
   <script src="./static/app.js"></script>
 </body>
 </html>

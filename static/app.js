@@ -15,6 +15,10 @@ let rafPending = false;
 function $(id) { return document.getElementById(id); }
 function show(id, on) { $(id).classList.toggle("hidden", !on); }
 
+function currentItem(rid) {
+  return STATE.model?.objects.get(rid) ?? STATE.model?.displayNodes.get(rid);
+}
+
 function initFileInput() {
   const input = $("fileInput");
   $("btnOpen").addEventListener("click", () => input.click());
@@ -59,6 +63,8 @@ async function openFile(file) {
 }
 
 function enterViewer(model) {
+  $("mediaDialog").close();
+  $("attributeDialog").close();
   STATE.model?.assets.dispose();
   STATE.model = model;
   STATE.activeRid = null;
@@ -87,6 +93,7 @@ function enterViewer(model) {
   setWarn(model.warnings);
   $("bodySelect").replaceChildren(new Option("自动识别", ""),
     ...model.bodyFields.map(name => new Option(name, name)));
+  initAttributeLayout();
   resetDocument();
   renderTree(specs);
   switchView($("viewSelect").value);
@@ -112,10 +119,10 @@ function locationPath(location) {
   const names = [];
   for (let parent = location.parent; parent; parent = parent.parent) {
     const { title, wid, rid } = parent.node;
-    names.push(title || wid || rid);
+    if (!parent.node.docTitle) names.push(title || wid || rid);
   }
   names.push(location.specName);
-  return names.reverse().join(" / ");
+  return names.reverse().filter((name, index, all) => index === 0 || name !== all[index - 1]).join(" / ");
 }
 
 function switchView(next) {
@@ -127,13 +134,15 @@ function switchView(next) {
   show("docPanel", false);
   show("bodyPicker", isDocument && STATE.model.bodyFields.length > 0);
   show("detailScroll", !isDocument);
+  positionAttributeSettings(isDocument ? null : currentItem(STATE.activeRid));
   if (isDocument) {
     showDocument();
   } else {
     show("detailEmpty", !STATE.activeRid);
     show("detail", !!STATE.activeRid);
-    if (STATE.activeRid) renderDetail(STATE.model.objects.get(STATE.activeRid), STATE.activeRid);
+    if (STATE.activeRid) renderDetail(currentItem(STATE.activeRid), STATE.activeRid);
   }
+  refreshBodySearch();
 }
 
 function showDocument() {
@@ -168,6 +177,7 @@ function refreshBody() {
     renderWindow();
     scroll.scrollTop = DOC.offs[anchor] + Math.min(offset, DOC.heights[anchor] - 1);
   }
+  refreshBodySearch();
   renderWindow();
 }
 
@@ -276,7 +286,12 @@ function buildNode(n, depth, parent, specName) {
   row.appendChild(caret);
 
   var label = document.createElement("span");
-  if (n.wid) {
+  if (n.docTitle) {
+    const label = document.createElement("span");
+    label.className = "display-label";
+    label.textContent = "文档";
+    row.appendChild(label);
+  } else if (n.wid) {
     var w = document.createElement("span");
     w.className = "wid";
     w.textContent = n.wid;
@@ -296,7 +311,7 @@ function buildNode(n, depth, parent, specName) {
   var badge = document.createElement("span");
   var tn = (n.type_name || "").toLowerCase();
   badge.className = "badge" + (tn === "heading" ? " heading" : tn.indexOf("info") >= 0 ? " info" : "");
-  badge.textContent = n.type_name || "";
+  badge.textContent = n.docTitle ? "展示节点" : n.type_name || "";
   label.appendChild(badge);
 
   row.appendChild(label);
@@ -413,36 +428,31 @@ function openItem(rid, key = STATE.firstNode.get(rid)?.node.key) {
     $("viewSelect").value = "workitem";
     switchView("workitem");
   } else {
-    renderDetail(STATE.model.objects.get(rid), rid);
+    renderDetail(currentItem(rid), rid);
+    refreshBodySearch();
   }
+  focusItemHit("detail");
 }
 
-function renderAttrsInto(d, it, body = []) {
-  const attrs = it.attrs.filter(attribute => attribute.kind !== "xhtml" && !body.includes(attribute));
-  if (attrs.length) {
-    var tbl = document.createElement("table");
-    tbl.className = "attr-table";
-    attrs.forEach(function (a) {
-      var tr = document.createElement("tr");
-      var th = document.createElement("th");
-      th.textContent = a.name;
-      var td = document.createElement("td");
-      td.textContent = a.value === null || a.value === "" ? "—" : a.value;
-      tr.appendChild(th); tr.appendChild(td);
-      tbl.appendChild(tr);
-    });
-    d.appendChild(tbl);
+function renderAttrsInto(d, it, body = [], includeBody = false) {
+  const attributes = it.attrs.filter(attribute => attribute.kind !== "xhtml" && !body.includes(attribute));
+  if (attributes.length) {
+    const host = document.createElement("div");
+    host.className = "attribute-section";
+    host.attributeValues = attributes;
+    renderAttributeTable(host);
+    d.append(host);
   }
 
-  const richAttrs = it.attrs.filter(attribute => attribute.kind === "xhtml" && attribute.html.trim() &&
+  const additional = it.attrs.filter(attribute => attribute.kind === "xhtml" && attribute.html.trim() &&
     !body.includes(attribute));
-  richAttrs.forEach(function (a) {
-    var h = document.createElement("div");
-    h.className = "section-h";
-    h.textContent = a.name;
-    d.appendChild(h);
-    d.appendChild(renderBody(a));
-  });
+  for (const attribute of [...(includeBody ? body : []), ...additional]) {
+    const heading = document.createElement("div");
+    heading.className = "section-h";
+    heading.textContent = attribute.name;
+    d.append(heading, renderBody(attribute, includeBody && body.includes(attribute) ? "detail" : null,
+      body.indexOf(attribute)));
+  }
 
   if (it.related && it.related.length) {
     var rh = document.createElement("div");
@@ -478,11 +488,17 @@ function renderDetail(it, rid) {
   $("detailScroll").scrollTop = 0;
   const d = $("detail");
   clearContent(d);
+  positionAttributeSettings(it);
 
   var h1 = document.createElement("h1");
   if (!it) {
     h1.textContent = rid;
     d.append(h1, "该引用在文件中没有对应的工作项");
+    return;
+  }
+  if (it.displayOnly) {
+    h1.textContent = it.title;
+    d.append(h1, displayNotice());
     return;
   }
   h1.textContent = (it.wid || "内部标识 " + it.rid) + (it.title ? "　" + it.title : "");
@@ -494,7 +510,14 @@ function renderDetail(it, rid) {
     (it.fallback ? " · <b>提示：该工作项无 Work Item ID，以上为内部标识</b>" : "");
   d.appendChild(meta);
 
-  renderAttrsInto(d, it);
+  renderAttrsInto(d, it, bodyAttributes(it, $("bodySelect").value), true);
+}
+
+function displayNotice() {
+  const notice = document.createElement("div");
+  notice.className = "meta";
+  notice.textContent = "文档标题由规格名称补充，仅用于展示。";
+  return notice;
 }
 
 function esc(s) {
@@ -536,7 +559,7 @@ function clearContent(container) {
   container.replaceChildren();
 }
 
-function renderBody(attribute) {
+function renderBody(attribute, searchKey = null, index = 0) {
   const block = document.createElement("div");
   if (attribute.kind === "xhtml") {
     block.className = "rich";
@@ -545,6 +568,12 @@ function renderBody(attribute) {
   } else {
     block.className = "plain-body";
     block.textContent = attribute.value;
+  }
+  prepareMedia(block);
+  if (searchKey !== null) {
+    block.dataset.searchKey = searchKey;
+    block.dataset.bodyIndex = index;
+    highlightBody(block);
   }
   return block;
 }
@@ -701,9 +730,9 @@ function makeBlock(i) {
     }
   }
 
-  for (const attribute of it.body) el.appendChild(renderBody(attribute));
+  it.body.forEach((attribute, index) => el.appendChild(renderBody(attribute, it.key, index)));
   el.addEventListener("click", event => {
-    if (!event.target.closest("button")) selectDocBlock(i);
+    if (!event.target.closest("button,img")) selectDocBlock(i);
   });
   return el;
 }
@@ -743,11 +772,15 @@ function selectDocBlock(index, fromTree) {
   $("docPanel").classList.remove("collapsed");
   $("docPanelCaret").textContent = "▾";
   show("docPanel", true);
-  $("docPanelTitle").textContent = [item.num, item.wid || item.rid, item.title].filter(Boolean).join(" ");
+  $("docPanelTitle").textContent = item.docTitle ? item.title :
+    [item.num, item.wid || item.rid, item.title].filter(Boolean).join(" ");
   const body = $("docPanelBody");
   clearContent(body);
-  renderAttrsInto(body, STATE.model.objects.get(item.rid), item.body);
+  positionAttributeSettings(currentItem(item.rid));
+  if (item.docTitle) body.append(displayNotice());
+  else renderAttrsInto(body, currentItem(item.rid), item.body);
   body.scrollTop = 0;
+  if (fromTree) focusItemHit(item.key);
 }
 
 function initDocPanel() {
@@ -789,6 +822,7 @@ function scheduleFilterQuery() {
 function runQuery() {
   if (!STATE.model) return;
   const query = $("searchInput").value.trim();
+  refreshBodySearch();
   if (!query && !STATE.filters.some(filter => filter.value)) {
     show("searchResults", false);
     show("tree", true);
@@ -824,9 +858,7 @@ function renderResults(items, query) {
   summary.className = "result-count";
   summary.textContent = items.length ? "匹配 " + items.length + " 项" : "没有匹配的工作项";
   list.append(summary);
-  const terms = query.split(/\s+/).filter(Boolean).sort((a, b) => b.length - a.length);
-  const pattern = terms.length ? new RegExp(terms.map(term =>
-    term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu") : null;
+  const pattern = queryPattern(query);
 
   for (const { item, match } of items) {
     const location = STATE.firstNode.get(item.rid);
@@ -836,7 +868,7 @@ function renderResults(items, query) {
     row.dataset.rid = item.rid;
     const id = document.createElement("span");
     id.className = "wid";
-    id.textContent = item.wid || item.rid;
+    id.textContent = item.displayOnly ? "文档标题 · 展示节点" : item.wid || item.rid;
     const title = document.createElement("span");
     title.className = "res-title";
     title.textContent = item.title || "（无标题）";
@@ -1086,6 +1118,9 @@ function renderStats(s) {
 }
 
 initFileInput();
+initMedia();
+initBodySearch();
+initAttributeSettings();
 $("right").addEventListener("click", downloadAttachment);
 initViewSwitch();
 initDocPanel();
