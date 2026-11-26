@@ -823,7 +823,7 @@ function runQuery() {
   if (!STATE.model) return;
   const query = $("searchInput").value.trim();
   refreshBodySearch();
-  if (!query && !STATE.filters.some(filter => filter.value)) {
+  if (!query && !STATE.filters.some(filter => filter.value.length)) {
     show("searchResults", false);
     show("tree", true);
     return;
@@ -961,7 +961,7 @@ function addFilterChip(def) {
   var isEnum = def.kind === "enumeration" && def.values && def.values.length;
   var f = {
     attr: def.name,
-    mode: isEnum ? "enum" : "text", value: "",
+    mode: isEnum ? "enum" : "text", value: isEnum ? [] : "",
     defValues: isEnum ? def.values : [],
   };
   STATE.filters.push(f);
@@ -973,10 +973,11 @@ function addFilterChip(def) {
   label.title = def.name;
   chip.appendChild(label);
   if (isEnum) {
-    var valBtn = document.createElement("span");
+    var valBtn = document.createElement("button");
+    valBtn.type = "button";
     valBtn.className = "chip-val";
     valBtn.textContent = "选择…";
-    valBtn.style.cursor = "pointer";
+    valBtn.title = def.name;
     chip.appendChild(valBtn);
     f.valBtn = valBtn;
     valBtn.addEventListener("click", function (e) {
@@ -1000,6 +1001,7 @@ function addFilterChip(def) {
   x.addEventListener("click", function () {
     STATE.filters = STATE.filters.filter(function (g) { return g !== f; });
     chip.remove();
+    show("comboMenu", false);
     runQuery();
   });
   chip.appendChild(x);
@@ -1017,6 +1019,7 @@ function openComboMenu(f, anchor) {
   sr.className = "menu-search";
   var inp = document.createElement("input");
   inp.placeholder = "搜索选项…";
+  inp.setAttribute("aria-label", "搜索 " + f.attr + " 选项");
   sr.appendChild(inp);
   cm.appendChild(sr);
   var listEl = document.createElement("div");
@@ -1033,18 +1036,22 @@ function openComboMenu(f, anchor) {
       e0.textContent = "无匹配选项";
       listEl.appendChild(e0);
     }
-    shown.slice(0, 300).forEach(function (v) {
-      var it = document.createElement("div");
-      it.className = "menu-item" + (v === f.value ? " on" : "");
+    shown.forEach(function (v) {
+      var it = document.createElement("label");
+      it.className = "menu-item combo-option";
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = f.value.includes(v);
       var t = document.createElement("span");
       t.textContent = v;
       t.title = v;
-      it.appendChild(t);
-      it.addEventListener("click", function () {
-        f.value = v;
-        f.valBtn.textContent = v;
-        f.valBtn.title = f.attr + " = " + v;
-        show("comboMenu", false);
+      it.append(checkbox, t);
+      checkbox.addEventListener("change", function () {
+        if (checkbox.checked) f.value.push(v);
+        else f.value = f.value.filter(value => value !== v);
+        const selected = f.value.join(" 或 ");
+        f.valBtn.textContent = selected || "选择…";
+        f.valBtn.title = selected ? f.attr + "：" + selected : f.attr;
         runQuery();
       });
       listEl.appendChild(it);
@@ -1058,6 +1065,7 @@ function openComboMenu(f, anchor) {
   cm.style.width = w + "px";
   cm.style.left = Math.min(r.left, window.innerWidth - w - 12) + "px";
   cm.style.top = (r.bottom + 6) + "px";
+  inp.focus();
 }
 
 function initStats() {

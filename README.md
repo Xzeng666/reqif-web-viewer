@@ -1,53 +1,57 @@
 # ReqIF Web Viewer
 
-在浏览器中查看本机的 ReqIF / ReqIFz 文件。支持文档阅读、工作项详情、全文搜索、属性筛选、关联关系和附件预览。
+**English** · [简体中文](README.zh-CN.md)
 
-[在线使用](https://xzeng666.github.io/reqif-web-viewer/) · [项目介绍](https://xzeng666.github.io/projects/reqif-web-viewer/)
+Read local ReqIF / ReqIFz files in your browser. Browse documents, inspect work items, search content, filter attributes, follow relations, and preview attachments.
 
-## 使用
+[Open viewer](https://xzeng666.github.io/reqif-web-viewer/) · [Project overview](https://xzeng666.github.io/projects/reqif-web-viewer/)
 
-打开查看器，点击「打开文件」或拖入文件。也可下载并解压源码，用现代浏览器打开 `index.html` 离线使用。
+## Usage
 
-| 功能 | 操作 |
+Open the viewer and click **打开文件** (Open file), or drag in a file. For offline use, download and extract the source, then open `index.html` in a modern browser.
+
+| Feature | Usage |
 | --- | --- |
-| 文档阅读 | 按目录定位，连续阅读各规格，切换纯文本或富文本正文字段。 |
-| 工作项详情 | 查看单条需求的属性、正文和出入向关联，点击关联条目继续查阅。 |
-| 搜索与筛选 | 搜索 ID、标题和内容，组合属性筛选，选择全部或任一关键词匹配。 |
-| 正文定位 | 查看高亮、命中次数和章节路径，使用「上一处 / 下一处」跳转。 |
-| 属性设置 | 点击工作项面板右下角的齿轮，勾选字段，通过拖动或 ↑ / ↓ 按钮排序。 |
-| 图片预览 | 点击图片后自动适应窗口，使用底部图标或滚轮缩放，拖动查看细节。 |
-| 表格与附件 | 宽表格在正文内横向滚动，压缩包中的其他附件点击后下载。 |
-| 统计 | 点击左下角，查看真实工作项、类型、规格、关联和附件数量。 |
+| Document reading | Navigate the outline, read specifications continuously, and choose a plain text or rich text body field. |
+| Work item details | Inspect attributes, content, and incoming or outgoing relations. Follow a relation to open the linked item. |
+| Search and filters | Search IDs, titles, and content. Combine attribute filters and choose whether all or any search terms must match. |
+| Content navigation | View highlights, match counts, and section paths. Use **上一处 / 下一处** (Previous / Next) to move between matches. |
+| Attribute settings | Click the gear at the bottom right of the work item panel to choose fields and reorder them by dragging or using the ↑ / ↓ buttons. |
+| Image preview | Click an image to fit it to the window. Zoom with the bottom controls or mouse wheel, and drag to pan. |
+| Tables and attachments | Scroll wide tables horizontally within the document. Click other archive attachments to download them. |
+| Statistics | Click the bottom left to view counts of source work items, types, specifications, relations, and attachments. |
 
-属性表标注继承的默认值，日期保留源时区，多选枚举分别显示。悬停属性值可查看原始内容。补充的文档标题标记为展示节点，统计按源文件中的工作项计算。
+Filter values within one field use OR; different fields use AND.
 
-图片和属性设置窗口均可通过 ×、点击外部或 Esc 关闭。字段显示偏好与侧栏宽度保存在当前浏览器。
+Attribute tables mark inherited defaults, preserve source time zones, and show enumeration values separately. Hover over a value to inspect its original content. Supplemental document headings are marked as display nodes and excluded from work item counts.
 
-## 本地处理
+Close image previews and attribute settings with ×, an outside click, or Esc. Field preferences and sidebar width are saved in the current browser.
 
-文件解析、搜索和附件读取均在浏览器中完成，文件内容不会上传至服务器。各标签页独立处理文件，文档中的外部资源不会自动加载。使用时遵循所在组织的数据管理要求。
+## Local processing
 
-## 文件支持
+File parsing, search, and attachment access run in the browser. File content is never uploaded to a server. Each tab handles its files independently, and external resources in documents are not loaded automatically. Follow your organization's data handling requirements.
 
-- ReqIF 支持字符串、富文本、枚举、整数、实数、布尔值和日期属性。
-- ReqIFz 应包含一个 ReqIF 主文件，可附带图片和其他文件，支持存储与 Deflate 压缩。
-- 单文件上限为 512 MiB，XML 上限为 200 MiB，压缩包解压总量上限为 500 MiB。
+## Supported files
 
-图片进入可见区域时加载，其他附件按点击读取。查看 ReqIFz 需要浏览器支持 `DecompressionStream` 的 `deflate-raw` 格式。
+- ReqIF supports string, rich text, enumeration, integer, real, boolean, and date attributes.
+- ReqIFz must contain one main ReqIF file and may include images and other attachments. Stored and Deflate compression are supported.
+- Limits: 512 MiB per file, 200 MiB for XML, and 500 MiB total uncompressed archive size.
 
-## 项目结构
+Images load when they enter the visible area. Other attachments are read on demand. Opening ReqIFz requires a browser that supports `deflate-raw` in `DecompressionStream`.
 
-| 文件 | 用途 |
+## Project structure
+
+| File | Purpose |
 | --- | --- |
-| `index.html` | 页面入口 |
-| `static/app.js` | 目录、视图和界面交互 |
-| `static/reqif.js` | ReqIF 解析、属性默认值和数据统计 |
-| `static/zip.js` | ReqIFz 读取与解压 |
-| `static/search.js` | 正文高亮与命中定位 |
-| `static/attributes.js` | 属性格式和显示设置 |
-| `static/media.js` | 图片预览与表格滚动 |
-| `static/style.css` | 页面样式 |
+| `index.html` | Page entry point |
+| `static/app.js` | Outline, views, and interface interactions |
+| `static/reqif.js` | ReqIF parsing, attribute defaults, and statistics |
+| `static/zip.js` | ReqIFz reading and decompression |
+| `static/search.js` | Content highlighting and match navigation |
+| `static/attributes.js` | Attribute formatting and display settings |
+| `static/media.js` | Image previews and table scrolling |
+| `static/style.css` | Page styles |
 
-## 许可证
+## License
 
 [MIT](LICENSE)

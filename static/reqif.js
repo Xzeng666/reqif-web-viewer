@@ -462,15 +462,15 @@ function documentItems(model, field) {
 function searchItems(model, query, filters, mode) {
   const lower = query.toLowerCase();
   const terms = [...new Set(lower.split(/\s+/).filter(Boolean))];
-  const active = filters.filter(filter => filter.value).map(filter => ({
-    ...filter, terms: filter.value.toLowerCase().split(/\s+/),
+  const active = filters.filter(filter => filter.value.length).map(filter => ({
+    ...filter, terms: filter.mode === "enum" ? filter.value : filter.value.toLowerCase().split(/\s+/),
   }));
   const exact = [];
   const results = [];
   for (const item of [...model.objects.values(), ...model.displayNodes.values()]) {
     if (!active.every(filter => item.attrs.some(attribute => attribute.name === filter.attr &&
       (filter.mode === "enum"
-        ? attribute.labels?.includes(filter.value)
+        ? filter.terms.some(term => attribute.labels?.includes(term))
         : filter.terms.some(term => attribute.value.toLowerCase().includes(term)))))) continue;
 
     let match = null;
