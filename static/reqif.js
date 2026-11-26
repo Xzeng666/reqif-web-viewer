@@ -238,17 +238,26 @@ function cleanRich(source, target, resolve, issues) {
   }
 }
 
-async function readReqif(file, progress) {
+async function inspectReqif(file) {
   if (!/\.reqifz?$/i.test(file.name)) throw new Error("仅支持 .reqif / .reqifz 文件");
   if (file.size > 512 * 1024 * 1024) throw new Error("文件超过 512 MiB");
-  await progress?.("读取文件", 0, file.size);
   const archive = /\.reqifz$/i.test(file.name) ? await readZip(file) : null;
   const documents = archive ? [...archive.entries.values()].filter(entry => /\.reqif$/i.test(entry.name)) : [];
   if (archive && documents.length !== 1) {
     throw new Error(documents.length ? "ReqIFz 包含多个 .reqif 文件" : "ReqIFz 中没有 .reqif 文件");
   }
   const main = documents[0];
-  if ((main?.size ?? file.size) > 200 * 1024 * 1024) throw new Error("ReqIF XML 超过 200 MiB");
+  const xmlSize = main?.size ?? file.size;
+  if (xmlSize > 200 * 1024 * 1024) throw new Error("ReqIF XML 超过 200 MiB");
+  return { file, archive, main, xmlSize };
+}
+
+async function readReqif(file, progress) {
+  await progress?.("读取文件");
+  return readReqifSource(await inspectReqif(file), progress);
+}
+
+async function readReqifSource({ file, archive, main, xmlSize }, progress) {
   const bytes = archive ? await archive.read(main, progress) :
     await readBytes(file, (loaded, total) => progress?.("读取文件", loaded, total));
   await progress?.("解析文档");
@@ -263,6 +272,7 @@ async function readReqif(file, progress) {
   return {
     ...await parseReqif(root, elements, assets.resolve, issues, progress),
     source: file.name,
+    xmlSize,
     attachments: archive ? archive.entries.size - 1 : 0,
     assets,
   };
@@ -298,18 +308,20 @@ async function parseReqif(root, elements, resolve, issues, progress) {
   }
 
   const typeDefinitions = new Map();
+  const fieldNames = new Set();
   for (const type of elements("SPEC-OBJECT-TYPE")) {
-    typeDefinitions.set(type.getAttribute("IDENTIFIER"),
-      Array.from(child(type, "SPEC-ATTRIBUTES")?.children ?? [], node =>
-        definitions.get(node.getAttribute("IDENTIFIER"))).filter(Boolean));
+    const fields = Array.from(child(type, "SPEC-ATTRIBUTES")?.children ?? [], node =>
+      definitions.get(node.getAttribute("IDENTIFIER"))).filter(Boolean);
+    for (const field of fields) fieldNames.add(field.name);
+    typeDefinitions.set(type.getAttribute("IDENTIFIER"), fields);
   }
 
   function readValue(value, definition, defaulted = false) {
-    const { id, name, kind } = definition ?? {
+    const { name, kind } = definition ?? {
       name: "(未知属性)", kind: value.localName.slice("ATTRIBUTE-VALUE-".length).toLowerCase(),
     };
     const raw = value.getAttribute("THE-VALUE") ?? "";
-    const attribute = { id, name, kind, value: raw, defaulted };
+    const attribute = { name, kind, value: raw, defaulted };
     if (kind === "xhtml") {
       const content = child(value, "THE-VALUE");
       const host = document.createElement("div");
@@ -343,8 +355,10 @@ async function parseReqif(root, elements, resolve, issues, progress) {
       if (!value.localName.startsWith("ATTRIBUTE-VALUE-") || value.namespaceURI !== root.namespaceURI) continue;
       const suffix = value.localName.slice("ATTRIBUTE-VALUE-".length);
       const id = ref(value, "DEFINITION", "ATTRIBUTE-DEFINITION-" + suffix + "-REF");
+      const definition = definitions.get(id);
       explicit.add(id);
-      attrs.push(readValue(value, definitions.get(id)));
+      if (definition) fieldNames.add(definition.name);
+      attrs.push(readValue(value, definition));
     }
     for (const definition of typeDefinitions.get(typeId) ?? []) {
       if (definition.defaultValue && !explicit.has(definition.id)) {
@@ -398,7 +412,7 @@ async function parseReqif(root, elements, resolve, issues, progress) {
   const specs = [];
   await progress?.("整理目录", 0, hierarchyCount);
   for (const node of elements("SPECIFICATION")) {
-    specs.push({ name: node.getAttribute("LONG-NAME") || "(未命名文档)",
+    specs.push({ id: node.getAttribute("IDENTIFIER"), name: node.getAttribute("LONG-NAME") || "(未命名文档)",
       tree: await hierarchy(child(node, "CHILDREN")) });
   }
   const displayNodes = new Map();
@@ -447,7 +461,7 @@ async function parseReqif(root, elements, resolve, issues, progress) {
   const attrs = [...filters.values()].filter(attribute =>
     attribute.count && attribute.name !== "ReqIF.Text").sort((a, b) => b.count - a.count)
     .map(attribute => ({ ...attribute, values: [...attribute.values].sort() }));
-  return { objects, displayNodes, specs, attrs, relations, warnings, bodyFields: [...bodyFields].sort() };
+  return { objects, displayNodes, specs, attrs, fieldNames, relations, warnings, bodyFields: [...bodyFields].sort() };
 }
 
 const bodyNames = new Set([
@@ -471,6 +485,12 @@ function documentItems(model, field) {
   let base = Infinity;
   function walk(nodes, level) {
     for (const node of nodes) {
+      if (node.ghost) {
+        items.push({ key: node.key, rid: node.rid, level, title: node.title,
+          kind: "ghost", body: [], length: 0 });
+        walk(node.children, level + 1);
+        continue;
+      }
       if (node.docTitle) {
         items.push({ key: node.key, rid: node.rid, wid: "", level,
           kind: "heading", title: node.title, caption: "", body: [], length: 0, docTitle: true });
@@ -479,7 +499,7 @@ function documentItems(model, field) {
       }
       const item = model.objects.get(node.rid);
       const body = bodyAttributes(item, field);
-      const heading = item.type_name.toLowerCase() === "heading";
+      const heading = !node.unplaced && item.type_name.toLowerCase() === "heading";
       items.push({
         key: node.key, rid: item.rid, wid: item.wid, level,
         kind: heading ? "heading" : body.length ? "text" : "plain",
@@ -511,15 +531,23 @@ function searchItems(model, query, filters, mode) {
   const lower = query.toLowerCase();
   const terms = [...new Set(lower.split(/\s+/).filter(Boolean))];
   const active = filters.filter(filter => filter.value.length).map(filter => ({
-    ...filter, terms: filter.mode === "enum" ? filter.value : filter.value.toLowerCase().split(/\s+/),
+    ...filter, terms: filter.mode === "text" ? filter.value.toLowerCase().split(/\s+/) : filter.value,
   }));
   const exact = [];
   const results = [];
   for (const item of [...model.objects.values(), ...model.displayNodes.values()]) {
-    if (!active.every(filter => item.attrs.some(attribute => attribute.name === filter.attr &&
-      (filter.mode === "enum"
-        ? filter.terms.some(term => attribute.labels?.includes(term))
-        : filter.terms.some(term => attribute.value.toLowerCase().includes(term)))))) continue;
+    const matchesFilters = active.every(filter => {
+      if (filter.mode === "type") return !item.displayOnly && filter.terms.includes(item.type_name);
+      return item.attrs.some(attribute => {
+        if (attribute.name !== filter.attr) return false;
+        if (filter.mode === "enum") {
+          const values = attribute.labels ?? [attribute.value];
+          return filter.terms.some(term => values.includes(term));
+        }
+        return filter.terms.some(term => attribute.value.toLowerCase().includes(term));
+      });
+    });
+    if (!matchesFilters) continue;
 
     let match = null;
     if (terms.length) {

@@ -88,7 +88,7 @@ async function readZip(file) {
     let name;
     try {
       name = utf8.decode(nameBytes);
-    } catch (error) {
+    } catch {
       if (flags & 0x800) throw invalidZip();
       name = legacy.decode(nameBytes);
     }

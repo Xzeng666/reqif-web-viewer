@@ -1,7 +1,7 @@
 
 "use strict";
 
-const STATE = { model: null, activeRid: null, activeKey: null, filters: [] };
+const STATE = { model: null, comparison: null, activeRid: null, activeKey: null, filters: [] };
 let view = "doc";
 let opening = false;
 
@@ -30,7 +30,7 @@ function initFileInput() {
   const zone = $("dropZone");
   document.body.addEventListener("dragover", event => {
     event.preventDefault();
-    if (!STATE.model) zone.classList.add("drag");
+    if (!STATE.model && !$("compareDialog").open) zone.classList.add("drag");
   });
   document.body.addEventListener("dragleave", event => {
     if (!event.relatedTarget) zone.classList.remove("drag");
@@ -38,46 +38,59 @@ function initFileInput() {
   document.body.addEventListener("drop", event => {
     event.preventDefault();
     zone.classList.remove("drag");
-    if (event.dataTransfer.files.length) openFile(event.dataTransfer.files[0]);
+    if (!$("compareDialog").open && event.dataTransfer.files.length) openFile(event.dataTransfer.files[0]);
   });
 }
 
 async function openFile(file) {
   if (opening) return;
+  try {
+    await withLoading(file.name, async progress => {
+      await enterViewer(await readReqif(file, progress), progress);
+    });
+  } catch (error) {
+    showFileError(error);
+  }
+}
+
+function showFileError(error) {
+  const message = $("fileMessage");
+  message.classList.add("err");
+  message.textContent = error.message || "无法打开文件";
+  show("fileMessage", true);
+}
+
+async function withLoading(title, task) {
   opening = true;
   $("btnOpen").disabled = true;
-  const message = $("fileMessage");
   const dialog = $("loadingDialog");
-  message.classList.remove("err");
+  const stageLabel = $("fileStage");
+  const percent = $("filePercent");
+  const bar = $("fileProgress");
   show("fileMessage", false);
-  dialog.title = file.name;
-  dialog.showModal();
+  show("loadingNote", false);
+  dialog.title = title;
   let lastStage = "", lastUpdate = 0;
   const progress = async (stage, completed = 0, total = 0) => {
     const now = performance.now();
     if (stage === lastStage && completed !== total && now - lastUpdate < 32) return;
     lastStage = stage;
     lastUpdate = now;
-    $("fileStage").textContent = stage;
-    const bar = $("fileProgress");
+    stageLabel.textContent = stage;
     if (total) {
       bar.max = total;
       bar.value = completed;
-      $("filePercent").textContent = Math.floor(completed / total * 100) + "%";
+      percent.textContent = Math.floor(completed / total * 100) + "%";
     } else {
       bar.removeAttribute("value");
-      $("filePercent").textContent = "";
+      percent.textContent = "";
     }
     await new Promise(resolve => setTimeout(resolve, 0));
   };
   try {
-    const model = await readReqif(file, progress);
-    await enterViewer(model, progress);
+    dialog.showModal();
+    await task(progress);
     await progress("完成", 1, 1);
-  } catch (error) {
-    message.classList.add("err");
-    message.textContent = error.message || "无法打开文件";
-    show("fileMessage", true);
   } finally {
     opening = false;
     $("btnOpen").disabled = false;
@@ -85,17 +98,21 @@ async function openFile(file) {
   }
 }
 
-async function enterViewer(model, progress) {
+async function enterViewer(model, progress, comparison = null) {
   $("mediaDialog").close();
   $("attributeDialog").close();
-  STATE.model?.assets.dispose();
+  const retained = new Set([model.assets, comparison?.before.assets]);
+  for (const assets of new Set([STATE.model?.assets, STATE.comparison?.before.assets])) {
+    if (!retained.has(assets)) assets?.dispose();
+  }
   STATE.model = model;
+  STATE.comparison = comparison;
   STATE.activeRid = null;
   STATE.activeKey = null;
   STATE.filters = [];
   clearTimeout(filterTimer);
-  $("fileInfo").textContent = model.source;
-  $("fileInfo").title = model.source;
+  $("fileInfo").textContent = comparison ? "" : model.source;
+  $("fileInfo").title = $("fileInfo").textContent;
   $("filterChips").replaceChildren();
   $("searchInput").value = "";
   clearContent($("detail"));
@@ -104,7 +121,7 @@ async function enterViewer(model, progress) {
   show("searchMode", false);
   $("docPanel").classList.remove("collapsed");
   for (const id of ["welcome", "docPanel", "filterMenu", "comboMenu", "ctxMenu", "statsModal",
-    "searchResults", "searchClear", "detail"]) show(id, false);
+    "searchResults", "searchClear", "hitControls", "detail"]) show(id, false);
   show("viewer", true);
   show("tree", true);
   $("filterBar").classList.remove("hidden");
@@ -114,11 +131,13 @@ async function enterViewer(model, progress) {
   $("statText").textContent = objects.size + " 个工作项 · " + specs.length + " 个规格" +
     (relations ? " · " + relations + " 个关联" : "") + (attachments ? " · " + attachments + " 个附件" : "");
   setWarn(model.warnings);
+  updateComparisonControls();
   $("bodySelect").replaceChildren(new Option("自动识别", ""),
     ...model.bodyFields.map(name => new Option(name, name)));
   initAttributeLayout();
   resetDocument();
   await renderTree(specs, progress);
+  filterComparisonOutline();
   await progress("生成文档");
   switchView($("viewSelect").value);
 }
@@ -158,7 +177,7 @@ function switchView(next) {
   show("docPanel", false);
   show("bodyPicker", isDocument && STATE.model.bodyFields.length > 0);
   show("detailScroll", !isDocument);
-  positionAttributeSettings(isDocument ? null : currentItem(STATE.activeRid));
+  if (isDocument || !STATE.activeRid) positionAttributeSettings(null);
   if (isDocument) {
     showDocument();
   } else {
@@ -171,7 +190,7 @@ function switchView(next) {
 
 function showDocument() {
   const firstOpen = !DOC.loaded;
-  if (firstOpen) buildDoc(documentItems(STATE.model, $("bodySelect").value));
+  if (firstOpen) buildDoc(viewerDocumentItems());
   const scroll = $("docScroll");
   scroll.scrollTop = DOC.scrollTop;
   const selected = DOC.index.get(STATE.activeKey);
@@ -194,7 +213,7 @@ function refreshBody() {
   const key = DOC.items[index]?.key;
   const offset = scroll.scrollTop - (DOC.offs[index] || 0);
   resetDocument();
-  buildDoc(documentItems(STATE.model, $("bodySelect").value));
+  buildDoc(viewerDocumentItems());
   const anchor = DOC.index.get(key);
   if (anchor !== undefined) {
     scroll.scrollTop = DOC.offs[anchor] + offset;
@@ -291,17 +310,19 @@ async function renderTree(specs, progress) {
   const total = specs.reduce((sum, spec) => sum + count(spec.tree), 0);
   await progress("生成目录", 0, total);
   for (const spec of specs) {
+    const section = document.createElement("div");
     const heading = document.createElement("div");
     heading.className = "spec-name";
     heading.textContent = spec.name;
-    host.appendChild(heading);
-    const pending = spec.tree.slice().reverse().map(node => ({ node, depth: 0, parent: null, host }));
+    section.appendChild(heading);
+    host.appendChild(section);
+    const pending = spec.tree.slice().reverse().map(node => ({ node, parent: null, host: section }));
     while (pending.length) {
-      const { node, depth, parent, host: target } = pending.pop();
-      target.appendChild(buildNode(node, depth, parent, spec.name));
+      const { node, parent, host: target } = pending.pop();
+      target.appendChild(buildNode(node, parent, spec.name));
       const entry = STATE.nodes.get(node.key);
       for (let index = node.children.length - 1; index >= 0; index--) {
-        pending.push({ node: node.children[index], depth: depth + 1, parent: entry, host: entry.kids });
+        pending.push({ node: node.children[index], parent: entry, host: entry.kids });
       }
       await progress("生成目录", STATE.nodes.size, total);
     }
@@ -309,7 +330,7 @@ async function renderTree(specs, progress) {
   $("tree").replaceChildren(host);
 }
 
-function buildNode(n, depth, parent, specName) {
+function buildNode(n, parent, specName) {
   var wrap = document.createElement("div");
   var row = document.createElement("div");
   row.className = "node-row";
@@ -322,6 +343,7 @@ function buildNode(n, depth, parent, specName) {
   row.appendChild(caret);
 
   var label = document.createElement("span");
+  markComparison(row, n.rid, label);
   if (n.docTitle) {
     const label = document.createElement("span");
     label.className = "display-label";
@@ -335,7 +357,8 @@ function buildNode(n, depth, parent, specName) {
   } else {
     var r = document.createElement("span");
     r.className = "rid";
-    r.textContent = "内部:" + n.rid.slice(0, 13) + "…";
+    const rid = STATE.comparison?.byRid.get(n.rid)?.id ?? n.rid;
+    r.textContent = "内部:" + rid.slice(0, 13) + "…";
     label.appendChild(r);
   }
   var t = document.createElement("span");
@@ -366,7 +389,7 @@ function buildNode(n, depth, parent, specName) {
     event.preventDefault();
     showCtxMenu(event.clientX, event.clientY, n.key);
   });
-  if (depth >= 1) setExpand(n.key, false);
+  if (parent) setExpand(n.key, false);
 
   wrap.appendChild(row);
   if (kids) wrap.appendChild(kids);
@@ -521,7 +544,8 @@ function renderDetail(it, rid) {
   $("detailScroll").scrollTop = 0;
   const d = $("detail");
   clearContent(d);
-  positionAttributeSettings(it);
+  const comparison = compareEntry(rid);
+  positionAttributeSettings(comparison ? null : it);
 
   var h1 = document.createElement("h1");
   if (!it) {
@@ -532,6 +556,12 @@ function renderDetail(it, rid) {
   if (it.displayOnly) {
     h1.textContent = it.title;
     d.append(h1, displayNotice());
+    return;
+  }
+  if (comparison) {
+    h1.textContent = [comparison.id, it.title].filter(Boolean).join("　");
+    d.append(h1);
+    renderComparisonDetail(d, comparison);
     return;
   }
   h1.textContent = (it.wid || "内部标识 " + it.rid) + (it.title ? "　" + it.title : "");
@@ -620,19 +650,23 @@ async function downloadAttachment(event) {
   try {
     const { blob, name } = await assets.download(Number(button.dataset.download));
     if (STATE.model.assets !== assets) return;
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.href = url;
-    link.download = name;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    downloadBlob(blob, name);
   } catch {
     button.classList.add("download-error");
   } finally {
     button.disabled = false;
   }
+}
+
+function downloadBlob(blob, name) {
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 const docObserver = new ResizeObserver(entries => {
@@ -662,6 +696,7 @@ function buildDoc(items) {
   for (const height of DOC.heights) DOC.offs.push(DOC.offs[DOC.offs.length - 1] + height);
   DOC.total = DOC.offs[items.length];
   $("docSpacer").style.height = DOC.total + "px";
+  $("docEmpty").textContent = STATE.comparison ? "没有符合筛选条件的工作项" : "当前文件没有可显示的文档内容";
   show("docEmpty", !items.length);
 }
 
@@ -720,7 +755,16 @@ function makeBlock(i) {
   }
   el.dataset.index = i;
 
-  if (it.kind === "heading") {
+  if (it.kind === "ghost") {
+    const head = document.createElement("div");
+    head.className = "doc-head";
+    const entry = STATE.comparison.byRid.get(it.rid);
+    const label = document.createElement("span");
+    label.className = "compare-ghost-label";
+    label.textContent = [entry.id, it.title].filter(Boolean).join("　");
+    head.append(label);
+    el.append(head);
+  } else if (it.kind === "heading") {
     var head = document.createElement("div");
     head.className = "doc-head";
     if (it.num) {
@@ -763,6 +807,7 @@ function makeBlock(i) {
     }
   }
 
+  markComparison(el, it.rid, el.querySelector(".doc-head"));
   it.body.forEach((attribute, index) => el.appendChild(renderBody(attribute, it.key, index)));
   el.addEventListener("click", event => {
     if (!event.target.closest("button,img")) selectDocBlock(i);
@@ -805,12 +850,14 @@ function selectDocBlock(index, fromTree) {
   $("docPanel").classList.remove("collapsed");
   $("docPanelCaret").textContent = "▾";
   show("docPanel", true);
+  const comparison = compareEntry(item.rid);
   $("docPanelTitle").textContent = item.docTitle ? item.title :
-    [item.num, item.wid || item.rid, item.title].filter(Boolean).join(" ");
+    [item.num, comparison?.id || item.wid || item.rid, item.title].filter(Boolean).join(" ");
   const body = $("docPanelBody");
   clearContent(body);
-  positionAttributeSettings(currentItem(item.rid));
+  positionAttributeSettings(comparison ? null : currentItem(item.rid));
   if (item.docTitle) body.append(displayNotice());
+  else if (comparison) renderComparisonDetail(body, comparison);
   else renderAttrsInto(body, currentItem(item.rid), item.body);
   body.scrollTop = 0;
   if (fromTree) focusItemHit(item.key);
@@ -854,14 +901,21 @@ function scheduleFilterQuery() {
 
 function runQuery() {
   if (!STATE.model) return;
-  const query = $("searchInput").value.trim();
   refreshBodySearch();
-  if (!query && !STATE.filters.some(filter => filter.value.length)) {
+  renderSearchSidebar();
+}
+
+function renderSearchSidebar() {
+  const query = $("searchInput").value.trim();
+  const hasCriteria = query || STATE.filters.some(filter => filter.value.length);
+  const results = hasCriteria ? searchItems(STATE.model, query, STATE.filters, $("searchMode").value) : null;
+  if (STATE.comparison) updateComparisonSummary(results);
+  if (!results) {
     show("searchResults", false);
     show("tree", true);
     return;
   }
-  renderResults(searchItems(STATE.model, query, STATE.filters, $("searchMode").value), query);
+  renderResults(STATE.comparison ? results.filter(({ item }) => comparisonMatches(item.rid)) : results, query);
 }
 
 function resultExcerpt(text, pattern) {
@@ -901,7 +955,9 @@ function renderResults(items, query) {
     row.dataset.rid = item.rid;
     const id = document.createElement("span");
     id.className = "wid";
-    id.textContent = item.displayOnly ? "文档标题 · 展示节点" : item.wid || item.rid;
+    id.textContent = item.displayOnly ? "文档标题 · 展示节点" :
+      STATE.comparison?.byRid.get(item.rid)?.id || item.wid || item.rid;
+    markComparison(id, item.rid);
     const title = document.createElement("span");
     title.className = "res-title";
     title.textContent = item.title || "（无标题）";
@@ -947,6 +1003,23 @@ function initFilterBar() {
   });
 }
 
+function filterFields(model, previous) {
+  const fields = new Map(model.attrs.map(field => [field.name, field]));
+  for (const field of previous?.attrs ?? []) {
+    const current = fields.get(field.name);
+    if (!current) fields.set(field.name, field);
+    else if (current.kind === "enumeration" && field.kind === "enumeration") {
+      fields.set(field.name, { ...current, values: [...new Set([...current.values, ...field.values])].sort() });
+    }
+  }
+  const type = fields.get("Type") ?? {
+    name: "Type", kind: "enumeration", objectType: true,
+    values: [...new Set(Array.from(model.objects.values(), item => item.type_name))].sort(),
+  };
+  fields.delete(type.name);
+  return [type, ...fields.values()];
+}
+
 function toggleFilterMenu() {
   var fm = $("filterMenu");
   var wasOpen = !fm.classList.contains("hidden");
@@ -955,10 +1028,10 @@ function toggleFilterMenu() {
   fm.innerHTML = "";
   var head = document.createElement("div");
   head.className = "menu-head";
-  head.textContent = "选择筛选属性（依据当前文件结构）";
+  head.textContent = "选择筛选字段";
   fm.appendChild(head);
   const added = new Set(STATE.filters.map(filter => filter.attr));
-  const list = STATE.model.attrs.filter(attribute => !added.has(attribute.name));
+  const list = filterFields(STATE.model, STATE.comparison?.before).filter(field => !added.has(field.name));
   if (!list.length) {
     var e0 = document.createElement("div");
     e0.className = "menu-item";
@@ -970,12 +1043,11 @@ function toggleFilterMenu() {
     it.className = "menu-item";
     var nm = document.createElement("span");
     nm.textContent = a.name;
-    nm.title = a.name + "（" + a.count + " 个工作项使用）";
+    nm.title = a.name;
     it.appendChild(nm);
     var k = document.createElement("span");
     k.className = "k";
-    k.textContent = (a.kind === "enumeration" && a.values && a.values.length) ?
-      "▼ 下拉" : "✎ 文本";
+    k.textContent = a.kind === "enumeration" && a.values.length ? "▼ 下拉" : "✎ 文本";
     it.appendChild(k);
     it.addEventListener("click", function () {
       show("filterMenu", false);
@@ -990,115 +1062,107 @@ function toggleFilterMenu() {
 }
 
 function addFilterChip(def) {
-  if (STATE.filters.some(function (f) { return f.attr === def.name; })) return;
-  var isEnum = def.kind === "enumeration" && def.values && def.values.length;
-  var f = {
-    attr: def.name,
-    mode: isEnum ? "enum" : "text", value: isEnum ? [] : "",
-    defValues: isEnum ? def.values : [],
-  };
-  STATE.filters.push(f);
-  var chip = document.createElement("div");
+  if (STATE.filters.some(filter => filter.attr === def.name)) return;
+  const isEnum = def.kind === "enumeration" && def.values.length > 0;
+  const mode = def.objectType ? "type" : isEnum ? "enum" : "text";
+  const filter = { attr: def.name, mode, value: isEnum ? [] : "" };
+  STATE.filters.push(filter);
+  const chip = document.createElement("div");
   chip.className = "filter-chip";
-  var label = document.createElement("span");
+  const label = document.createElement("span");
   label.className = "chip-label";
   label.textContent = def.name;
   label.title = def.name;
   chip.appendChild(label);
   if (isEnum) {
-    var valBtn = document.createElement("button");
-    valBtn.type = "button";
-    valBtn.className = "chip-val";
-    valBtn.textContent = "选择…";
-    valBtn.title = def.name;
-    chip.appendChild(valBtn);
-    f.valBtn = valBtn;
-    valBtn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      openComboMenu(f, valBtn);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip-val";
+    button.textContent = "选择…";
+    button.title = def.name;
+    chip.append(button);
+    button.addEventListener("click", event => {
+      event.stopPropagation();
+      openComboMenu(filter, button, def.values);
     });
   } else {
-    var inp = document.createElement("input");
-    inp.className = "chip-input";
-    inp.placeholder = "包含…";
-    inp.addEventListener("input", function () {
-      f.value = inp.value.trim();
+    const input = document.createElement("input");
+    input.className = "chip-input";
+    input.placeholder = "包含…";
+    input.addEventListener("input", () => {
+      filter.value = input.value.trim();
       scheduleFilterQuery();
     });
-    chip.appendChild(inp);
+    chip.append(input);
   }
-  var x = document.createElement("button");
-  x.className = "chip-x";
-  x.textContent = "×";
-  x.title = "移除筛选";
-  x.addEventListener("click", function () {
-    STATE.filters = STATE.filters.filter(function (g) { return g !== f; });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "chip-x";
+  remove.textContent = "×";
+  remove.title = "移除筛选";
+  remove.addEventListener("click", () => {
+    STATE.filters = STATE.filters.filter(item => item !== filter);
     chip.remove();
     show("comboMenu", false);
     runQuery();
   });
-  chip.appendChild(x);
-  $("filterChips").appendChild(chip);
+  chip.append(remove);
+  $("filterChips").append(chip);
 }
 
-function openComboMenu(f, anchor) {
-  var cm = $("comboMenu");
-  var wasOpen = !cm.classList.contains("hidden");
-  show("comboMenu", false);
-  if (wasOpen && cm._owner === f) return;
-  cm._owner = f;
-  cm.innerHTML = "";
-  var sr = document.createElement("div");
-  sr.className = "menu-search";
-  var inp = document.createElement("input");
-  inp.placeholder = "搜索选项…";
-  inp.setAttribute("aria-label", "搜索 " + f.attr + " 选项");
-  sr.appendChild(inp);
-  cm.appendChild(sr);
-  var listEl = document.createElement("div");
-  cm.appendChild(listEl);
-  var render = function (kw) {
-    listEl.innerHTML = "";
-    var kws = (kw || "").toLowerCase();
-    var shown = f.defValues.filter(function (v) {
-      return !kws || v.toLowerCase().indexOf(kws) >= 0;
-    });
+function openComboMenu(filter, anchor, options) {
+  const menu = $("comboMenu");
+  const toggling = !menu.classList.contains("hidden") && menu._owner === filter;
+  show("comboMenu", !toggling);
+  if (toggling) return;
+  menu._owner = filter;
+  const search = document.createElement("div");
+  search.className = "menu-search";
+  const input = document.createElement("input");
+  input.placeholder = "搜索选项…";
+  input.setAttribute("aria-label", "搜索 " + filter.attr + " 选项");
+  search.append(input);
+  const list = document.createElement("div");
+  menu.replaceChildren(search, list);
+  function renderOptions() {
+    list.replaceChildren();
+    const keyword = input.value.trim().toLowerCase();
+    const shown = options.filter(value => value.toLowerCase().includes(keyword));
     if (!shown.length) {
-      var e0 = document.createElement("div");
-      e0.className = "menu-item";
-      e0.textContent = "无匹配选项";
-      listEl.appendChild(e0);
+      const empty = document.createElement("div");
+      empty.className = "menu-item";
+      empty.textContent = "无匹配选项";
+      list.append(empty);
     }
-    shown.forEach(function (v) {
-      var it = document.createElement("label");
-      it.className = "menu-item combo-option";
-      var checkbox = document.createElement("input");
+    for (const value of shown) {
+      const option = document.createElement("label");
+      option.className = "menu-item combo-option";
+      const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.checked = f.value.includes(v);
-      var t = document.createElement("span");
-      t.textContent = v;
-      t.title = v;
-      it.append(checkbox, t);
-      checkbox.addEventListener("change", function () {
-        if (checkbox.checked) f.value.push(v);
-        else f.value = f.value.filter(value => value !== v);
-        const selected = f.value.join(" 或 ");
-        f.valBtn.textContent = selected || "选择…";
-        f.valBtn.title = selected ? f.attr + "：" + selected : f.attr;
+      checkbox.checked = filter.value.includes(value);
+      const label = document.createElement("span");
+      label.textContent = value;
+      label.title = value;
+      option.append(checkbox, label);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) filter.value.push(value);
+        else filter.value = filter.value.filter(item => item !== value);
+        const selected = filter.value.join(" 或 ");
+        anchor.textContent = selected || "选择…";
+        anchor.title = selected ? filter.attr + "：" + selected : filter.attr;
         runQuery();
       });
-      listEl.appendChild(it);
-    });
-  };
-  render("");
-  inp.addEventListener("input", function () { render(inp.value.trim()); });
-  show("comboMenu", true);
-  var r = anchor.getBoundingClientRect();
-  var w = Math.max(240, Math.min(r.width + 80, 360));
-  cm.style.width = w + "px";
-  cm.style.left = Math.min(r.left, window.innerWidth - w - 12) + "px";
-  cm.style.top = (r.bottom + 6) + "px";
-  inp.focus();
+      list.append(option);
+    }
+  }
+  renderOptions();
+  input.addEventListener("input", renderOptions);
+  const rect = anchor.getBoundingClientRect();
+  const width = Math.max(240, Math.min(rect.width + 80, 360));
+  menu.style.width = width + "px";
+  menu.style.left = Math.min(rect.left, window.innerWidth - width - 12) + "px";
+  menu.style.top = (rect.bottom + 6) + "px";
+  input.focus();
 }
 
 function initStats() {
@@ -1159,6 +1223,7 @@ function renderStats(s) {
 }
 
 initFileInput();
+initComparison();
 initMedia();
 initBodySearch();
 initAttributeSettings();

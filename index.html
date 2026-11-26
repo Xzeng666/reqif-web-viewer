@@ -46,7 +46,14 @@
       <span id="filePercent"></span>
     </div>
     <progress id="fileProgress" aria-labelledby="fileStage"></progress>
+    <p id="loadingNote" class="muted hidden"></p>
   </dialog>
+
+  <div id="compareBar" class="hidden">
+    <span>旧版 <strong id="compareOldName"></strong></span>
+    <span aria-hidden="true">→</span>
+    <span>新版 <strong id="compareNewName"></strong></span>
+  </div>
 
   <div id="welcome">
     <div id="dropZone">
@@ -55,6 +62,7 @@
       <p>也可点击「打开文件」选择本机文件。</p>
       <p class="muted">文件在当前浏览器内处理。</p>
     </div>
+    <button type="button" id="compareWelcome" class="compare-button" aria-haspopup="dialog">版本对比</button>
   </div>
 
   <main id="viewer" class="hidden">
@@ -109,7 +117,42 @@
   <footer id="statusbar">
     <button id="statBtn" title="点击查看详细统计">📊 <span id="statText">未导入文件</span></button>
     <span id="statWarn" class="warn hidden" title=""></span>
+    <button type="button" id="compareCurrent" class="compare-button hidden" aria-haspopup="dialog">版本对比</button>
+    <div id="compareSummary" class="hidden" role="group" aria-label="按差异状态筛选"></div>
+    <div id="compareTools" class="hidden">
+      <label><input id="compareChangesOnly" type="checkbox"> 只看变化</label>
+      <details id="compareActions">
+        <summary id="compareActionTrigger" class="btn">对比操作</summary>
+        <div class="compare-action-list">
+          <button id="compareReplace" type="button">更换文件</button>
+          <button id="compareCsv" type="button">导出 CSV</button>
+          <button id="compareHtml" type="button">导出 HTML</button>
+          <button id="compareExit" type="button">退出对比</button>
+        </div>
+      </details>
+    </div>
   </footer>
+
+  <dialog id="compareDialog" aria-labelledby="compareTitle">
+    <div class="dialog-head">
+      <h2 id="compareTitle">版本对比</h2>
+      <button id="closeCompare" class="icon-button dialog-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="compare-pickers">
+      <button class="compare-picker" id="chooseCompareOld" type="button" autofocus>
+        <strong>旧版</strong>
+        <span class="compare-file-name">拖入或选择文件</span>
+      </button>
+      <input type="file" id="compareOldFile" accept=".reqif,.reqifz" hidden>
+      <button class="compare-picker" id="chooseCompareNew" type="button">
+        <strong>新版</strong>
+        <span class="compare-file-name">拖入或选择文件</span>
+      </button>
+      <input type="file" id="compareNewFile" accept=".reqif,.reqifz" hidden>
+      <p id="compareError" class="hidden" role="status"></p>
+      <button id="startCompare" type="button" class="btn" disabled>开始对比</button>
+    </div>
+  </dialog>
 
   <div id="filterMenu" class="menu hidden"></div>
   <div id="comboMenu" class="menu hidden"></div>
@@ -167,6 +210,8 @@
   <script src="./static/media.js"></script>
   <script src="./static/search.js"></script>
   <script src="./static/attributes.js"></script>
+  <script src="./static/compare.js"></script>
+  <script src="./static/compare-view.js"></script>
   <script src="./static/app.js"></script>
 </body>
 </html>

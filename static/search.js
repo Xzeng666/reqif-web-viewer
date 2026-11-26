@@ -59,7 +59,7 @@ function refreshBodySearch() {
   let groups = DOC.items;
   if (view !== "doc") {
     const item = currentItem(STATE.activeRid);
-    groups = item ? [{ key: "detail", body: bodyAttributes(item, $("bodySelect").value) }] : [];
+    groups = item && !compareEntry(item.rid) ? [{ key: "detail", body: bodyAttributes(item, $("bodySelect").value) }] : [];
   }
   if (pattern) {
     for (const group of groups) {
