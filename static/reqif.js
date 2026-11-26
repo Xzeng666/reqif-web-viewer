@@ -1,5 +1,10 @@
 "use strict";
 
+const attributeKinds = ["string", "xhtml", "enumeration", "integer", "real", "boolean", "date"];
+const reqifTags = new Set([
+  "SPEC-OBJECT-TYPE", "DATATYPE-DEFINITION-ENUMERATION", "SPEC-OBJECT", "SPEC-HIERARCHY",
+  "SPECIFICATION", "SPEC-RELATION", ...attributeKinds.map(kind => "ATTRIBUTE-DEFINITION-" + kind.toUpperCase()),
+]);
 const imageTypes = new Map(Object.entries({
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
   webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml", avif: "image/avif",
@@ -36,6 +41,41 @@ function decodeXml(bytes) {
   } catch {
     throw new Error("无法读取 ReqIF XML 的字符编码");
   }
+}
+
+async function parseXml(text, progress) {
+  const xml = document.implementation.createDocument(null, null);
+  const index = new Map();
+  const parser = new ReqifXML.SaxesParser({ xmlns: true });
+  let parent = xml, root;
+  parser.on("opentag", tag => {
+    const node = xml.createElementNS(tag.uri, tag.name);
+    for (const attribute of Object.values(tag.attributes)) {
+      node.setAttributeNS(attribute.uri, attribute.name, attribute.value);
+    }
+    parent.appendChild(node);
+    parent = node;
+    root ||= node;
+    if (node.namespaceURI === root.namespaceURI && reqifTags.has(node.localName)) {
+      if (!index.has(node.localName)) index.set(node.localName, []);
+      index.get(node.localName).push(node);
+    }
+  });
+  parser.on("closetag", () => { parent = parent.parentNode; });
+  parser.on("text", value => {
+    if (parent !== xml) parent.appendChild(xml.createTextNode(value));
+  });
+  parser.on("cdata", value => parent.appendChild(xml.createCDATASection(value)));
+  parser.on("doctype", () => { throw new Error("ReqIF 文件不能包含 DTD"); });
+  parser.on("error", () => { throw new Error("无法解析 ReqIF XML，请检查文件格式"); });
+  await progress?.("解析文档", 0, text.length);
+  for (let start = 0; start < text.length; start += 64 * 1024) {
+    const end = Math.min(start + 64 * 1024, text.length);
+    parser.write(text.slice(start, end));
+    await progress?.("解析文档", end, text.length);
+  }
+  parser.close();
+  return { root, elements: name => index.get(name) ?? [] };
 }
 
 function normalizedPath(path) {
@@ -198,9 +238,10 @@ function cleanRich(source, target, resolve, issues) {
   }
 }
 
-async function readReqif(file) {
+async function readReqif(file, progress) {
   if (!/\.reqifz?$/i.test(file.name)) throw new Error("仅支持 .reqif / .reqifz 文件");
   if (file.size > 512 * 1024 * 1024) throw new Error("文件超过 512 MiB");
+  await progress?.("读取文件", 0, file.size);
   const archive = /\.reqifz$/i.test(file.name) ? await readZip(file) : null;
   const documents = archive ? [...archive.entries.values()].filter(entry => /\.reqif$/i.test(entry.name)) : [];
   if (archive && documents.length !== 1) {
@@ -208,30 +249,27 @@ async function readReqif(file) {
   }
   const main = documents[0];
   if ((main?.size ?? file.size) > 200 * 1024 * 1024) throw new Error("ReqIF XML 超过 200 MiB");
-  const bytes = archive ? await archive.read(main) : new Uint8Array(await file.arrayBuffer());
+  const bytes = archive ? await archive.read(main, progress) :
+    await readBytes(file, (loaded, total) => progress?.("读取文件", loaded, total));
+  await progress?.("解析文档");
   const text = decodeXml(bytes);
-  if (/^\s*(?:<\?[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<!DOCTYPE\b/.test(text)) {
-    throw new Error("ReqIF 文件不能包含 DTD");
-  }
-  const xml = new DOMParser().parseFromString(text, "application/xml");
-  const root = xml.documentElement;
-  if (xml.doctype || root.localName !== "REQ-IF" ||
-      xml.getElementsByTagNameNS("http://www.mozilla.org/newlayout/xml/parsererror.xml", "parsererror").length) {
+  const { root, elements } = await parseXml(text, progress);
+  if (root?.localName !== "REQ-IF") {
     throw new Error("无法解析 ReqIF XML，请检查文件格式");
   }
 
   const issues = { dropped: 0, missing: new Set() };
   const assets = attachmentReader(archive, main, issues.missing);
   return {
-    ...parseReqif(root, assets.resolve, issues),
+    ...await parseReqif(root, elements, assets.resolve, issues, progress),
     source: file.name,
     attachments: archive ? archive.entries.size - 1 : 0,
     assets,
   };
 }
 
-function parseReqif(root, resolve, issues) {
-  const elements = name => root.getElementsByTagNameNS(root.namespaceURI, name);
+async function parseReqif(root, elements, resolve, issues, progress) {
+  await progress?.("读取属性");
   const typeNames = new Map(Array.from(elements("SPEC-OBJECT-TYPE"), node =>
     [node.getAttribute("IDENTIFIER"), node.getAttribute("LONG-NAME") || ""]));
   const enumLabels = new Map();
@@ -248,7 +286,7 @@ function parseReqif(root, resolve, issues) {
 
   const definitions = new Map();
   const filters = new Map();
-  for (const kind of ["string", "xhtml", "enumeration", "integer", "real", "boolean", "date"]) {
+  for (const kind of attributeKinds) {
     for (const node of elements("ATTRIBUTE-DEFINITION-" + kind.toUpperCase())) {
       const name = node.getAttribute("LONG-NAME") || "(未命名属性)";
       const values = datatypes.get(ref(node, "TYPE", "DATATYPE-DEFINITION-ENUMERATION-REF")) ?? [];
@@ -292,7 +330,9 @@ function parseReqif(root, resolve, issues) {
 
   const objects = new Map();
   const bodyFields = new Set();
-  for (const node of elements("SPEC-OBJECT")) {
+  const objectNodes = elements("SPEC-OBJECT");
+  await progress?.("解析工作项", 0, objectNodes.length);
+  for (const [index, node] of objectNodes.entries()) {
     const rid = node.getAttribute("IDENTIFIER");
     if (!rid) continue;
     const typeId = ref(node, "TYPE", "SPEC-OBJECT-TYPE-REF");
@@ -332,29 +372,35 @@ function parseReqif(root, resolve, issues) {
     for (const { name, value } of attrs) if (value) searchFields.push({ name, value });
     for (const field of searchFields) field.lower = field.value.toLowerCase();
     objects.set(rid, { rid, wid, title, type_name, fallback: !wid, attrs, related: [], searchFields });
+    await progress?.("解析工作项", index + 1, objectNodes.length);
   }
   if (!objects.size) throw new Error("ReqIF 中没有工作项（SPEC-OBJECT）");
 
   let key = 0;
-  function hierarchy(holder, depth = 0) {
+  let hierarchyDone = 0;
+  const hierarchyCount = elements("SPEC-HIERARCHY").length;
+  async function hierarchy(holder, depth = 0) {
     if (depth > 512) throw new Error("ReqIF 文档层级超过 512 层");
     const nodes = [];
     for (const node of holder?.children ?? []) {
       if (node.localName !== "SPEC-HIERARCHY" || node.namespaceURI !== root.namespaceURI) continue;
       const rid = ref(node, "OBJECT", "SPEC-OBJECT-REF");
       const nodeKey = key++;
-      const children = hierarchy(child(node, "CHILDREN"), depth + 1);
+      const children = await hierarchy(child(node, "CHILDREN"), depth + 1);
       const item = objects.get(rid);
       if (item) nodes.push({ key: nodeKey, rid, wid: item.wid, title: item.title, type_name: item.type_name, children });
       else nodes.push(...children);
+      await progress?.("整理目录", ++hierarchyDone, hierarchyCount);
     }
     return nodes;
   }
 
-  const specs = Array.from(elements("SPECIFICATION"), node => ({
-    name: node.getAttribute("LONG-NAME") || "(未命名文档)",
-    tree: hierarchy(child(node, "CHILDREN")),
-  }));
+  const specs = [];
+  await progress?.("整理目录", 0, hierarchyCount);
+  for (const node of elements("SPECIFICATION")) {
+    specs.push({ name: node.getAttribute("LONG-NAME") || "(未命名文档)",
+      tree: await hierarchy(child(node, "CHILDREN")) });
+  }
   const displayNodes = new Map();
   specs.forEach((spec, index) => {
     if (!spec.name || spec.name === "(未命名文档)") return;
@@ -385,7 +431,8 @@ function parseReqif(root, resolve, issues) {
   if (issues.missing.size) warnings.push(issues.missing.size + " 个附件引用不可用");
 
   let relations = 0;
-  for (const node of elements("SPEC-RELATION")) {
+  const relationNodes = elements("SPEC-RELATION");
+  for (const [index, node] of relationNodes.entries()) {
     const source = ref(node, "SOURCE", "SPEC-OBJECT-REF");
     const target = ref(node, "TARGET", "SPEC-OBJECT-REF");
     if (!source || !target) continue;
@@ -394,6 +441,7 @@ function parseReqif(root, resolve, issues) {
     from?.related.push({ dir: "out", rid: target });
     if (source !== target) to?.related.push({ dir: "in", rid: source });
     relations++;
+    await progress?.("建立关联", index + 1, relationNodes.length);
   }
 
   const attrs = [...filters.values()].filter(attribute =>

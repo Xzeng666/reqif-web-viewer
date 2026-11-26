@@ -14,9 +14,24 @@ const crcTable = Uint32Array.from({ length: 256 }, (_, index) => {
   return crc;
 });
 
-function crc32(bytes) {
+function readBytes(blob, progress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = event => progress?.(event.loaded, event.total);
+    reader.onload = () => resolve(new Uint8Array(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+async function crc32(bytes, progress) {
   let crc = 0xffffffff;
-  for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff];
+  await progress?.("校验文档", 0, bytes.length);
+  for (let start = 0; start < bytes.length; start += 1024 * 1024) {
+    const end = Math.min(start + 1024 * 1024, bytes.length);
+    for (let index = start; index < end; index++) crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[index]) & 0xff];
+    await progress?.("校验文档", end, bytes.length);
+  }
   return (crc ^ 0xffffffff) >>> 0;
 }
 
@@ -84,7 +99,7 @@ async function readZip(file) {
     entries.set(name, { name, flags, method, crc, compressed, size, localOffset });
   }
 
-  async function read(entry) {
+  async function read(entry, progress) {
     if (entry.flags & 1) throw new Error("不支持加密的 ReqIFz 条目");
     const local = new DataView(await file.slice(entry.localOffset, entry.localOffset + 30).arrayBuffer());
     if (local.getUint32(0, true) !== zipSignature.local ||
@@ -95,7 +110,7 @@ async function readZip(file) {
     let bytes;
     if (entry.method === 0) {
       if (entry.compressed !== entry.size) throw invalidZip();
-      bytes = new Uint8Array(await data.arrayBuffer());
+      bytes = await readBytes(data, (loaded, total) => progress?.("读取文档", loaded, total));
     } else if (entry.method === 8) {
       let inflater;
       try {
@@ -106,6 +121,7 @@ async function readZip(file) {
       const reader = data.stream().pipeThrough(inflater).getReader();
       bytes = new Uint8Array(entry.size);
       let written = 0;
+      await progress?.("解压文档", 0, entry.size);
       try {
         for (;;) {
           const { done, value } = await reader.read();
@@ -113,6 +129,7 @@ async function readZip(file) {
           if (written + value.length > bytes.length) throw invalidZip();
           bytes.set(value, written);
           written += value.length;
+          await progress?.("解压文档", written, entry.size);
         }
       } catch {
         await reader.cancel().catch(() => {});
@@ -124,7 +141,7 @@ async function readZip(file) {
     } else {
       throw new Error("不支持该 ReqIFz 条目的压缩方式");
     }
-    if (crc32(bytes) !== entry.crc) throw invalidZip();
+    if (await crc32(bytes, progress) !== entry.crc) throw invalidZip();
     return bytes;
   }
 

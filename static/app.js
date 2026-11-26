@@ -20,6 +20,7 @@ function currentItem(rid) {
 }
 
 function initFileInput() {
+  $("loadingDialog").addEventListener("cancel", event => event.preventDefault());
   const input = $("fileInput");
   $("btnOpen").addEventListener("click", () => input.click());
   input.addEventListener("change", () => {
@@ -46,23 +47,45 @@ async function openFile(file) {
   opening = true;
   $("btnOpen").disabled = true;
   const message = $("fileMessage");
+  const dialog = $("loadingDialog");
   message.classList.remove("err");
-  message.textContent = "正在解析 " + file.name + "…";
-  show("fileMessage", true);
+  show("fileMessage", false);
+  dialog.title = file.name;
+  dialog.showModal();
+  let lastStage = "", lastUpdate = 0;
+  const progress = async (stage, completed = 0, total = 0) => {
+    const now = performance.now();
+    if (stage === lastStage && completed !== total && now - lastUpdate < 32) return;
+    lastStage = stage;
+    lastUpdate = now;
+    $("fileStage").textContent = stage;
+    const bar = $("fileProgress");
+    if (total) {
+      bar.max = total;
+      bar.value = completed;
+      $("filePercent").textContent = Math.floor(completed / total * 100) + "%";
+    } else {
+      bar.removeAttribute("value");
+      $("filePercent").textContent = "";
+    }
+    await new Promise(resolve => setTimeout(resolve, 0));
+  };
   try {
-    const model = await readReqif(file);
-    enterViewer(model);
-    show("fileMessage", false);
+    const model = await readReqif(file, progress);
+    await enterViewer(model, progress);
+    await progress("完成", 1, 1);
   } catch (error) {
     message.classList.add("err");
     message.textContent = error.message || "无法打开文件";
+    show("fileMessage", true);
   } finally {
     opening = false;
     $("btnOpen").disabled = false;
+    dialog.close();
   }
 }
 
-function enterViewer(model) {
+async function enterViewer(model, progress) {
   $("mediaDialog").close();
   $("attributeDialog").close();
   STATE.model?.assets.dispose();
@@ -95,7 +118,8 @@ function enterViewer(model) {
     ...model.bodyFields.map(name => new Option(name, name)));
   initAttributeLayout();
   resetDocument();
-  renderTree(specs);
+  await renderTree(specs, progress);
+  await progress("生成文档");
   switchView($("viewSelect").value);
 }
 
@@ -259,18 +283,30 @@ function doJumpToIndex(i, animate) {
   });
 }
 
-function renderTree(specs) {
+async function renderTree(specs, progress) {
   STATE.nodes = new Map();
   STATE.firstNode = new Map();
-  const host = $("tree");
-  host.replaceChildren();
+  const host = document.createDocumentFragment();
+  const count = nodes => nodes.reduce((total, node) => total + 1 + count(node.children), 0);
+  const total = specs.reduce((sum, spec) => sum + count(spec.tree), 0);
+  await progress("生成目录", 0, total);
   for (const spec of specs) {
     const heading = document.createElement("div");
     heading.className = "spec-name";
     heading.textContent = spec.name;
     host.appendChild(heading);
-    for (const node of spec.tree) host.appendChild(buildNode(node, 0, null, spec.name));
+    const pending = spec.tree.slice().reverse().map(node => ({ node, depth: 0, parent: null, host }));
+    while (pending.length) {
+      const { node, depth, parent, host: target } = pending.pop();
+      target.appendChild(buildNode(node, depth, parent, spec.name));
+      const entry = STATE.nodes.get(node.key);
+      for (let index = node.children.length - 1; index >= 0; index--) {
+        pending.push({ node: node.children[index], depth: depth + 1, parent: entry, host: entry.kids });
+      }
+      await progress("生成目录", STATE.nodes.size, total);
+    }
   }
+  $("tree").replaceChildren(host);
 }
 
 function buildNode(n, depth, parent, specName) {
@@ -320,10 +356,7 @@ function buildNode(n, depth, parent, specName) {
   const entry = { node: n, parent, specName, kids, caret, row };
   STATE.nodes.set(n.key, entry);
   if (!STATE.firstNode.has(n.rid)) STATE.firstNode.set(n.rid, entry);
-  if (kids) {
-    kids.className = "node-children";
-    for (const child of n.children) kids.appendChild(buildNode(child, depth + 1, entry, specName));
-  }
+  if (kids) kids.className = "node-children";
   row.addEventListener("click", () => openItem(n.rid, n.key));
   caret.addEventListener("click", event => {
     event.stopPropagation();

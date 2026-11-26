@@ -100,8 +100,7 @@ body {
 #dropZone h2 { margin: 12px 0 6px; font-size: 18px; }
 .muted { color: #6a737d; font-size: 12px; }
 #fileMessage { padding: 8px 16px; overflow-wrap: anywhere; }
-#fileMessage.err { color: #c0392b; background: #fdecea; border: 1px solid #f5c6cb;
-  white-space: pre-wrap; }
+#fileMessage.err { color: #c0392b; background: #fdecea; border: 1px solid #f5c6cb; white-space: pre-wrap; }
 .hidden { display: none !important; }
 
 #viewer { flex: 1; display: flex; min-height: 0; position: relative; }
@@ -392,6 +391,14 @@ dialog {
   color: #24292f; background: #fff; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px);
 }
 dialog::backdrop { background: rgba(20, 30, 45, .55); }
+#loadingDialog {
+  width: 360px; padding: 24px; outline: none; box-shadow: 0 12px 36px rgba(20, 30, 45, .16);
+}
+#loadingDialog::backdrop { background: rgba(20, 30, 45, .18); }
+#fileLoading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 12px; }
+#fileStage { font-size: 13px; font-weight: 600; }
+#filePercent { color: #57606a; font-size: 12px; font-variant-numeric: tabular-nums; }
+#fileProgress { display: block; width: 100%; height: 10px; accent-color: #2f6fdb; }
 .dialog-head {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   padding: 10px 14px; border-bottom: 1px solid #e1e4e8; flex: none;
