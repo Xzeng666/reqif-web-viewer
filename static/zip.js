@@ -26,17 +26,17 @@ function readBytes(blob, progress) {
 
 async function crc32(bytes, progress) {
   let crc = 0xffffffff;
-  await progress?.("校验文档", 0, bytes.length);
+  await progress?.("Verifying document", 0, bytes.length);
   for (let start = 0; start < bytes.length; start += 1024 * 1024) {
     const end = Math.min(start + 1024 * 1024, bytes.length);
     for (let index = start; index < end; index++) crc = (crc >>> 8) ^ crcTable[(crc ^ bytes[index]) & 0xff];
-    await progress?.("校验文档", end, bytes.length);
+    await progress?.("Verifying document", end, bytes.length);
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
 
 function invalidZip() {
-  return new Error("ReqIFz 压缩包已损坏或格式无效");
+  return new Error("ReqIFz archive is damaged or invalid");
 }
 
 async function readZip(file) {
@@ -54,10 +54,10 @@ async function readZip(file) {
   const offset = tail.getUint32(end + 16, true);
   if (tail.getUint32(end + 4, true) || count !== tail.getUint16(end + 8, true) ||
       count === 0xffff || length === 0xffffffff || offset === 0xffffffff) {
-    throw new Error("不支持分卷或使用 ZIP64 中央目录的 ReqIFz");
+    throw new Error("Split archives and ZIP64 central directories are unsupported");
   }
   if (count > 20000 || length > 32 * 1024 * 1024) {
-    throw new Error("ReqIFz 目录过大");
+    throw new Error("ReqIFz directory is too large");
   }
   if (offset + length > tailStart + end) throw invalidZip();
 
@@ -93,14 +93,14 @@ async function readZip(file) {
       name = legacy.decode(nameBytes);
     }
     total += size;
-    if (total > 500 * 1024 * 1024) throw new Error("ReqIFz 解压后超过 500 MiB");
+    if (total > 500 * 1024 * 1024) throw new Error("Uncompressed ReqIFz exceeds 500 MiB");
     if (name.endsWith("/")) continue;
     if (!name || entries.has(name)) throw invalidZip();
     entries.set(name, { name, flags, method, crc, compressed, size, localOffset });
   }
 
   async function read(entry, progress) {
-    if (entry.flags & 1) throw new Error("不支持加密的 ReqIFz 条目");
+    if (entry.flags & 1) throw new Error("Encrypted ReqIFz entries are unsupported");
     const local = new DataView(await file.slice(entry.localOffset, entry.localOffset + 30).arrayBuffer());
     if (local.getUint32(0, true) !== zipSignature.local ||
         local.getUint16(8, true) !== entry.method) throw invalidZip();
@@ -110,18 +110,18 @@ async function readZip(file) {
     let bytes;
     if (entry.method === 0) {
       if (entry.compressed !== entry.size) throw invalidZip();
-      bytes = await readBytes(data, (loaded, total) => progress?.("读取文档", loaded, total));
+      bytes = await readBytes(data, (loaded, total) => progress?.("Reading document", loaded, total));
     } else if (entry.method === 8) {
       let inflater;
       try {
         inflater = new DecompressionStream("deflate-raw");
       } catch {
-        throw new Error("当前浏览器无法解压 ReqIFz，请使用新版浏览器");
+        throw new Error("This browser can't decompress ReqIFz. Use a newer browser.");
       }
       const reader = data.stream().pipeThrough(inflater).getReader();
       bytes = new Uint8Array(entry.size);
       let written = 0;
-      await progress?.("解压文档", 0, entry.size);
+      await progress?.("Decompressing document", 0, entry.size);
       try {
         for (;;) {
           const { done, value } = await reader.read();
@@ -129,7 +129,7 @@ async function readZip(file) {
           if (written + value.length > bytes.length) throw invalidZip();
           bytes.set(value, written);
           written += value.length;
-          await progress?.("解压文档", written, entry.size);
+          await progress?.("Decompressing document", written, entry.size);
         }
       } catch {
         await reader.cancel().catch(() => {});
@@ -139,7 +139,7 @@ async function readZip(file) {
       }
       if (written !== entry.size) throw invalidZip();
     } else {
-      throw new Error("不支持该 ReqIFz 条目的压缩方式");
+      throw new Error("Unsupported compression method in ReqIFz");
     }
     if (await crc32(bytes, progress) !== entry.crc) throw invalidZip();
     return bytes;

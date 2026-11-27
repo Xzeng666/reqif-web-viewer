@@ -6,8 +6,10 @@ function prepareMedia(block) {
   for (const image of block.querySelectorAll("img")) {
     image.tabIndex = 0;
     image.setAttribute("role", "button");
-    image.setAttribute("aria-label", "放大图片 " + image.alt);
-    image.title = "点击放大，预览中可缩放和拖动";
+    localize(image, () => {
+      image.title = translate("Open image preview");
+      image.setAttribute("aria-label", image.alt ? translate("Enlarge image {0}", image.alt) : image.title);
+    });
     image.draggable = false;
   }
   for (const table of block.querySelectorAll("table")) {
@@ -15,9 +17,21 @@ function prepareMedia(block) {
     const scroll = document.createElement("div");
     scroll.className = "table-scroll";
     scroll.tabIndex = 0;
-    scroll.setAttribute("aria-label", "表格，可横向滚动");
+    localize(scroll, () => { scroll.setAttribute("aria-label", translate("Table, scroll horizontally")); });
     table.replaceWith(scroll);
     scroll.append(table);
+  }
+  for (const attachment of block.querySelectorAll("[data-missing-attachment]")) {
+    localize(attachment, () => {
+      attachment.textContent = translate("[Missing attachment: {0}]", attachment.dataset.missingAttachment || translate("Attachment"));
+    });
+  }
+  for (const download of block.querySelectorAll("[data-download]")) {
+    localize(download, () => {
+      if (download.hasAttribute("data-attachment-label")) download.textContent = translate("Attachment");
+      if (download.dataset.downloadName) download.title = translate("Download {0}", download.dataset.downloadName);
+      download.dataset.error = translate("Read failed");
+    });
   }
 }
 
@@ -35,7 +49,7 @@ async function openImage(image) {
   preview.draggable = false;
   MEDIA.image = preview;
   MEDIA.fit = true;
-  $("mediaTitle").textContent = image.alt || "图片";
+  localize($("mediaTitle"), () => { $("mediaTitle").textContent = image.alt || translate("Image"); });
   $("mediaStage").replaceChildren(preview);
   $("mediaDialog").showModal();
   await preview.decode();

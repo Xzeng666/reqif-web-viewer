@@ -1,6 +1,6 @@
 # ReqIF Web Viewer
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md) · [Deutsch](README.de.md)
 
 A read-only viewer for local ReqIF and ReqIFz files. Browse requirements, search content, and compare two versions in your browser.
 
@@ -8,16 +8,16 @@ A read-only viewer for local ReqIF and ReqIFz files. Browse requirements, search
 
 ## Open a file
 
-Click **打开文件** (Open file) or drop a file onto the viewer. To use it offline, extract the source and open `index.html` in a modern browser.
+Click **Open file** or drop a file onto the viewer. To use it offline, extract the source and open `index.html` in a modern browser.
 
 - Browse specifications in the document view or open individual work items to inspect attributes and relations.
-- Search by ID, title, or content. Use **上一处 / 下一处** (Previous / Next) to step through body matches. Filters use OR within a dropdown and AND across fields.
+- Search by ID, title, or content. Use **Previous match** and **Next match** to step through body matches. Filters use OR within a dropdown and AND across fields.
 - Use the gear in the work item panel to choose and reorder fields. Attribute tables mark inherited defaults and preserve source time zones.
 - Zoom and pan images, scroll wide tables, and download archive attachments. The bottom-left statistics count source work items once, even when referenced in multiple specifications.
 
 ## Compare versions
 
-Click **版本对比** (Compare versions) and select the older and newer files. If a file is already open, the bottom-right entry uses it as the newer version. Select a work item to see changes side by side, or use the counts at the bottom to filter by status. Export a CSV or an offline HTML report from **对比操作** (Comparison actions).
+Click **Compare versions** and select the older and newer files. If a file is already open, the bottom-right entry uses it as the newer version. Select a work item to see changes side by side, or use the counts at the bottom to filter by status. Export a CSV or an offline HTML report from **Comparison actions**.
 
 Matching uses a unique `ReqIF.ForeignID`, with `IDENTIFIER` as the fallback when a foreign ID is missing. The comparison covers titles, body text, and shared attributes. An item found only in the older file may have been removed or omitted from the newer export.
 

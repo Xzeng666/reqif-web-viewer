@@ -85,8 +85,8 @@ function updateHitCount() {
   const { hits, active, pattern } = BODY_SEARCH;
   show("hitControls", !!pattern);
   show("readerTools", !!pattern || !$("bodyPicker").classList.contains("hidden"));
-  $("hitCount").textContent = active < 0 ? "正文 " + hits.length + " 处" :
-    "正文 " + (active + 1) + " / " + hits.length;
+  if (active < 0) localizeText($("hitCount"), "Body matches: {0}", hits.length);
+  else localizeText($("hitCount"), "Body match {0} / {1}", active + 1, hits.length);
   $("previousHit").disabled = !hits.length;
   $("nextHit").disabled = !hits.length;
 }

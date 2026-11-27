@@ -39,7 +39,7 @@ function decodeXml(bytes) {
   try {
     return new TextDecoder(encoding, { fatal: true }).decode(bytes);
   } catch {
-    throw new Error("无法读取 ReqIF XML 的字符编码");
+    throw new Error("Can't read the ReqIF XML character encoding");
   }
 }
 
@@ -66,13 +66,13 @@ async function parseXml(text, progress) {
     if (parent !== xml) parent.appendChild(xml.createTextNode(value));
   });
   parser.on("cdata", value => parent.appendChild(xml.createCDATASection(value)));
-  parser.on("doctype", () => { throw new Error("ReqIF 文件不能包含 DTD"); });
-  parser.on("error", () => { throw new Error("无法解析 ReqIF XML，请检查文件格式"); });
-  await progress?.("解析文档", 0, text.length);
+  parser.on("doctype", () => { throw new Error("A ReqIF file must not contain a DTD"); });
+  parser.on("error", () => { throw new Error("Can't parse ReqIF XML. Check the file format."); });
+  await progress?.("Parsing XML", 0, text.length);
   for (let start = 0; start < text.length; start += 64 * 1024) {
     const end = Math.min(start + 64 * 1024, text.length);
     parser.write(text.slice(start, end));
-    await progress?.("解析文档", end, text.length);
+    await progress?.("Parsing XML", end, text.length);
   }
   parser.close();
   return { root, elements: name => index.get(name) ?? [] };
@@ -174,7 +174,7 @@ function cleanRich(source, target, resolve, issues) {
     }
     if (tag === "img" || tag === "object") {
       const path = node.getAttribute(tag === "img" ? "src" : "data") ?? "";
-      const label = node.getAttribute("alt") || path.split(/[/\\]/).pop()?.slice(0, 60) || "附件";
+      const label = node.getAttribute("alt") || path.split(/[/\\]/).pop()?.slice(0, 60) || "";
       const asset = resolve(path, true);
       const preview = asset?.url || asset?.type;
       const element = document.createElement(preview ? "img" : asset ? "button" : "span");
@@ -194,10 +194,12 @@ function cleanRich(source, target, resolve, issues) {
       } else if (asset) {
         element.type = "button";
         element.dataset.download = asset.index;
-        element.textContent = label;
+        if (!label) element.dataset.attachmentLabel = "";
+        element.textContent = label || "Attachment";
       } else {
         element.className = "miss-attach";
-        element.textContent = "[缺失附件：" + label + "]";
+        element.dataset.missingAttachment = label;
+        element.textContent = label || "Attachment";
       }
       target.append(element);
       if (!asset && tag === "object") cleanRich(node, target, resolve, issues);
@@ -230,7 +232,8 @@ function cleanRich(source, target, resolve, issues) {
       if (element.querySelector("[data-download]")) download.textContent = element.textContent.trim() || asset.name;
       else if (element.textContent.trim() || element.querySelector("img")) download.append(...element.childNodes);
       else download.textContent = asset.name;
-      download.title = title || "下载 " + asset.name;
+      if (title) download.title = title;
+      else download.dataset.downloadName = asset.name;
       target.append(download);
     } else {
       target.append(element);
@@ -239,32 +242,32 @@ function cleanRich(source, target, resolve, issues) {
 }
 
 async function inspectReqif(file) {
-  if (!/\.reqifz?$/i.test(file.name)) throw new Error("仅支持 .reqif / .reqifz 文件");
-  if (file.size > 512 * 1024 * 1024) throw new Error("文件超过 512 MiB");
+  if (!/\.reqifz?$/i.test(file.name)) throw new Error("Only .reqif and .reqifz files are supported");
+  if (file.size > 512 * 1024 * 1024) throw new Error("File exceeds 512 MiB");
   const archive = /\.reqifz$/i.test(file.name) ? await readZip(file) : null;
   const documents = archive ? [...archive.entries.values()].filter(entry => /\.reqif$/i.test(entry.name)) : [];
   if (archive && documents.length !== 1) {
-    throw new Error(documents.length ? "ReqIFz 包含多个 .reqif 文件" : "ReqIFz 中没有 .reqif 文件");
+    throw new Error(documents.length ? "ReqIFz contains multiple .reqif files" : "No .reqif file in the ReqIFz archive");
   }
   const main = documents[0];
   const xmlSize = main?.size ?? file.size;
-  if (xmlSize > 200 * 1024 * 1024) throw new Error("ReqIF XML 超过 200 MiB");
+  if (xmlSize > 200 * 1024 * 1024) throw new Error("ReqIF XML exceeds 200 MiB");
   return { file, archive, main, xmlSize };
 }
 
 async function readReqif(file, progress) {
-  await progress?.("读取文件");
+  await progress?.("Reading file");
   return readReqifSource(await inspectReqif(file), progress);
 }
 
 async function readReqifSource({ file, archive, main, xmlSize }, progress) {
   const bytes = archive ? await archive.read(main, progress) :
-    await readBytes(file, (loaded, total) => progress?.("读取文件", loaded, total));
-  await progress?.("解析文档");
+    await readBytes(file, (loaded, total) => progress?.("Reading file", loaded, total));
+  await progress?.("Parsing XML");
   const text = decodeXml(bytes);
   const { root, elements } = await parseXml(text, progress);
   if (root?.localName !== "REQ-IF") {
-    throw new Error("无法解析 ReqIF XML，请检查文件格式");
+    throw new Error("Can't parse ReqIF XML. Check the file format.");
   }
 
   const issues = { dropped: 0, missing: new Set() };
@@ -279,7 +282,7 @@ async function readReqifSource({ file, archive, main, xmlSize }, progress) {
 }
 
 async function parseReqif(root, elements, resolve, issues, progress) {
-  await progress?.("读取属性");
+  await progress?.("Reading attributes");
   const typeNames = new Map(Array.from(elements("SPEC-OBJECT-TYPE"), node =>
     [node.getAttribute("IDENTIFIER"), node.getAttribute("LONG-NAME") || ""]));
   const enumLabels = new Map();
@@ -298,11 +301,13 @@ async function parseReqif(root, elements, resolve, issues, progress) {
   const filters = new Map();
   for (const kind of attributeKinds) {
     for (const node of elements("ATTRIBUTE-DEFINITION-" + kind.toUpperCase())) {
-      const name = node.getAttribute("LONG-NAME") || "(未命名属性)";
+      const title = node.getAttribute("LONG-NAME");
+      const nameKey = title ? undefined : "(Unnamed attribute)";
+      const name = title || nameKey;
       const values = datatypes.get(ref(node, "TYPE", "DATATYPE-DEFINITION-ENUMERATION-REF")) ?? [];
       const id = node.getAttribute("IDENTIFIER");
-      definitions.set(id, { id, name, kind, defaultValue: child(node, "DEFAULT-VALUE")?.firstElementChild });
-      if (!filters.has(name)) filters.set(name, { name, kind, values: new Set(), count: 0 });
+      definitions.set(id, { id, name, nameKey, kind, defaultValue: child(node, "DEFAULT-VALUE")?.firstElementChild });
+      if (!filters.has(name)) filters.set(name, { name, nameKey, kind, values: new Set(), count: 0 });
       values.forEach(value => filters.get(name).values.add(value));
     }
   }
@@ -317,11 +322,11 @@ async function parseReqif(root, elements, resolve, issues, progress) {
   }
 
   function readValue(value, definition, defaulted = false) {
-    const { name, kind } = definition ?? {
-      name: "(未知属性)", kind: value.localName.slice("ATTRIBUTE-VALUE-".length).toLowerCase(),
+    const { name, nameKey, kind } = definition ?? {
+      name: "(Unknown attribute)", nameKey: "(Unknown attribute)", kind: value.localName.slice("ATTRIBUTE-VALUE-".length).toLowerCase(),
     };
     const raw = value.getAttribute("THE-VALUE") ?? "";
-    const attribute = { name, kind, value: raw, defaulted };
+    const attribute = { name, nameKey, kind, value: raw, defaulted };
     if (kind === "xhtml") {
       const content = child(value, "THE-VALUE");
       const host = document.createElement("div");
@@ -341,14 +346,14 @@ async function parseReqif(root, elements, resolve, issues, progress) {
   }
 
   const objects = new Map();
-  const bodyFields = new Set();
+  const bodyFields = new Map();
   const objectNodes = elements("SPEC-OBJECT");
-  await progress?.("解析工作项", 0, objectNodes.length);
+  await progress?.("Reading work items", 0, objectNodes.length);
   for (const [index, node] of objectNodes.entries()) {
     const rid = node.getAttribute("IDENTIFIER");
     if (!rid) continue;
     const typeId = ref(node, "TYPE", "SPEC-OBJECT-TYPE-REF");
-    const type_name = typeNames.get(typeId) || "(未知类型)";
+    const type_name = typeNames.get(typeId) || "";
     const attrs = [];
     const explicit = new Set();
     for (const value of child(node, "VALUES")?.children ?? []) {
@@ -378,23 +383,23 @@ async function parseReqif(root, elements, resolve, issues, progress) {
     title ||= node.getAttribute("LONG-NAME") || "";
     for (const attribute of attrs) {
       if (attribute.html?.trim() || (attribute.kind === "string" && attribute.value)) {
-        bodyFields.add(attribute.name);
+        bodyFields.set(attribute.name, attribute.nameKey);
       }
     }
-    const searchFields = [{ name: "工作项 ID", value: wid || rid }, { name: "标题", value: title }];
-    if (wid && wid !== rid) searchFields.push({ name: "内部标识", value: rid });
-    for (const { name, value } of attrs) if (value) searchFields.push({ name, value });
+    const searchFields = [{ nameKey: "Work item ID", value: wid || rid }, { nameKey: "Title", value: title }];
+    if (wid && wid !== rid) searchFields.push({ nameKey: "Internal ID", value: rid });
+    for (const { name, nameKey, value } of attrs) if (value) searchFields.push({ name, nameKey, value });
     for (const field of searchFields) field.lower = field.value.toLowerCase();
     objects.set(rid, { rid, wid, title, type_name, fallback: !wid, attrs, related: [], searchFields });
-    await progress?.("解析工作项", index + 1, objectNodes.length);
+    await progress?.("Reading work items", index + 1, objectNodes.length);
   }
-  if (!objects.size) throw new Error("ReqIF 中没有工作项（SPEC-OBJECT）");
+  if (!objects.size) throw new Error("No work items (SPEC-OBJECT) in the ReqIF file");
 
   let key = 0;
   let hierarchyDone = 0;
   const hierarchyCount = elements("SPEC-HIERARCHY").length;
   async function hierarchy(holder, depth = 0) {
-    if (depth > 512) throw new Error("ReqIF 文档层级超过 512 层");
+    if (depth > 512) throw new Error("The ReqIF hierarchy exceeds 512 levels");
     const nodes = [];
     for (const node of holder?.children ?? []) {
       if (node.localName !== "SPEC-HIERARCHY" || node.namespaceURI !== root.namespaceURI) continue;
@@ -404,20 +409,22 @@ async function parseReqif(root, elements, resolve, issues, progress) {
       const item = objects.get(rid);
       if (item) nodes.push({ key: nodeKey, rid, wid: item.wid, title: item.title, type_name: item.type_name, children });
       else nodes.push(...children);
-      await progress?.("整理目录", ++hierarchyDone, hierarchyCount);
+      await progress?.("Reading outline", ++hierarchyDone, hierarchyCount);
     }
     return nodes;
   }
 
   const specs = [];
-  await progress?.("整理目录", 0, hierarchyCount);
+  await progress?.("Reading outline", 0, hierarchyCount);
   for (const node of elements("SPECIFICATION")) {
-    specs.push({ id: node.getAttribute("IDENTIFIER"), name: node.getAttribute("LONG-NAME") || "(未命名文档)",
-      tree: await hierarchy(child(node, "CHILDREN")) });
+    const title = node.getAttribute("LONG-NAME");
+    const nameKey = title ? undefined : "(Unnamed specification)";
+    const tree = await hierarchy(child(node, "CHILDREN"));
+    specs.push({ id: node.getAttribute("IDENTIFIER"), name: title || nameKey, nameKey, tree });
   }
   const displayNodes = new Map();
   specs.forEach((spec, index) => {
-    if (!spec.name || spec.name === "(未命名文档)") return;
+    if (spec.nameKey) return;
     const exists = (function has(nodes) {
       return nodes.some(node => node.title === spec.name || has(node.children));
     })(spec.tree);
@@ -425,24 +432,24 @@ async function parseReqif(root, elements, resolve, issues, progress) {
     let rid = "_doc-title-" + index;
     while (objects.has(rid)) rid += "_";
     displayNodes.set(rid, {
-      rid, wid: "", title: spec.name, type_name: "文档标题", displayOnly: true,
+      rid, wid: "", title: spec.name, displayOnly: true,
       attrs: [], related: [],
-      searchFields: [{ name: "文档标题", value: spec.name, lower: spec.name.toLowerCase() }],
+      searchFields: [{ nameKey: "Document title", value: spec.name, lower: spec.name.toLowerCase() }],
     });
     spec.tree = [{ key: key++, rid, wid: "", title: spec.name,
-      type_name: "文档标题", docTitle: true, children: spec.tree }];
+      docTitle: true, children: spec.tree }];
   });
   const warnings = [];
   if (!specs.length) {
     const tree = Array.from(objects.values(), ({ rid, wid, title, type_name }) =>
       ({ key: key++, rid, wid, title, type_name, children: [] }));
-    specs.push({ name: "全部工作项", tree });
-    warnings.push("文件不含规格层级，已按工作项列表展示");
+    specs.push({ name: "All work items", nameKey: "All work items", tree });
+    warnings.push(["No specification hierarchy. Showing the work item list."]);
   }
   const missingIds = [...objects.values()].filter(item => item.fallback).length;
-  if (missingIds) warnings.push(missingIds + " 个工作项使用内部标识");
-  if (issues.dropped) warnings.push("已移除 " + issues.dropped + " 个不支持的富文本元素");
-  if (issues.missing.size) warnings.push(issues.missing.size + " 个附件引用不可用");
+  if (missingIds) warnings.push(["Work items using internal IDs: {0}", missingIds]);
+  if (issues.dropped) warnings.push(["Unsupported rich text elements removed: {0}", issues.dropped]);
+  if (issues.missing.size) warnings.push(["Unavailable attachment references: {0}", issues.missing.size]);
 
   let relations = 0;
   const relationNodes = elements("SPEC-RELATION");
@@ -455,13 +462,14 @@ async function parseReqif(root, elements, resolve, issues, progress) {
     from?.related.push({ dir: "out", rid: target });
     if (source !== target) to?.related.push({ dir: "in", rid: source });
     relations++;
-    await progress?.("建立关联", index + 1, relationNodes.length);
+    await progress?.("Linking work items", index + 1, relationNodes.length);
   }
 
   const attrs = [...filters.values()].filter(attribute =>
     attribute.count && attribute.name !== "ReqIF.Text").sort((a, b) => b.count - a.count)
     .map(attribute => ({ ...attribute, values: [...attribute.values].sort() }));
-  return { objects, displayNodes, specs, attrs, fieldNames, relations, warnings, bodyFields: [...bodyFields].sort() };
+  const bodies = [...bodyFields.keys()].sort().map(name => ({ name, nameKey: bodyFields.get(name) }));
+  return { objects, displayNodes, specs, attrs, fieldNames, relations, warnings, bodyFields: bodies };
 }
 
 const bodyNames = new Set([

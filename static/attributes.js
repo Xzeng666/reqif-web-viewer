@@ -23,12 +23,18 @@ function initAttributeLayout() {
   ATTRIBUTE_LAYOUT.hidden = strings(saved?.hidden) ? saved.hidden : [];
 }
 
+function booleanValue(value) {
+  const text = value.trim();
+  if (text === "true" || text === "1") return true;
+  if (text === "false" || text === "0") return false;
+}
+
 function attributeText(attribute) {
   const { kind, value } = attribute;
   if (!value) return "—";
   if (kind === "boolean") {
-    if (value.trim() === "true" || value.trim() === "1") return "是";
-    if (value.trim() === "false" || value.trim() === "0") return "否";
+    const flag = booleanValue(value);
+    if (flag !== undefined) return translate(flag ? "Yes" : "No");
   }
   if (kind === "date") {
     const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})?$/);
@@ -45,7 +51,7 @@ function renderAttributeTable(host) {
   if (!attributes.length) {
     const notice = document.createElement("p");
     notice.className = "muted";
-    notice.textContent = "属性已隐藏，可在右下角设置中重新选择。";
+    localizeText(notice, "Use field settings to show hidden fields");
     host.append(notice);
     return;
   }
@@ -55,7 +61,8 @@ function renderAttributeTable(host) {
     const row = table.insertRow();
     const label = document.createElement("th");
     label.scope = "row";
-    label.textContent = attribute.name;
+    if (attribute.nameKey) localizeText(label, attribute.nameKey);
+    else label.textContent = attribute.name;
     const value = document.createElement("td");
     value.title = attribute.value || "";
     if (attribute.kind === "enumeration" && attribute.labels.length) {
@@ -65,13 +72,17 @@ function renderAttributeTable(host) {
         chip.textContent = text;
         value.append(chip);
       }
+    } else if (attribute.kind === "boolean") {
+      const text = document.createTextNode("");
+      value.append(text);
+      localize(value, () => { text.data = attributeText(attribute); });
     } else {
       value.textContent = attributeText(attribute);
     }
     if (attribute.defaulted) {
       const badge = document.createElement("span");
       badge.className = "default-value";
-      badge.textContent = "默认值";
+      localizeText(badge, "Default");
       value.append(badge);
     }
     row.append(label, value);
@@ -85,8 +96,8 @@ function saveAttributeLayout() {
 }
 
 function renderAttributeSettings() {
-  const fields = new Set(STATE.model.attrs.filter(attribute => attribute.kind !== "xhtml")
-    .map(attribute => attribute.name));
+  const fields = new Map(STATE.model.attrs.filter(attribute => attribute.kind !== "xhtml")
+    .map(attribute => [attribute.name, attribute]));
   const names = ATTRIBUTE_LAYOUT.order.filter(name => fields.has(name));
   const list = $("attributeFields");
   list.replaceChildren();
@@ -97,8 +108,11 @@ function renderAttributeSettings() {
     const handle = document.createElement("button");
     handle.type = "button";
     handle.className = "attribute-drag icon-button";
-    handle.title = "拖动排序";
-    handle.setAttribute("aria-label", "拖动 " + name + " 排序");
+    const field = fields.get(name);
+    localize(handle, () => {
+      handle.title = translate("Drag to reorder");
+      handle.setAttribute("aria-label", translate("Drag {0} to reorder", localName(field)));
+    });
     handle.innerHTML = '<svg viewBox="0 0 16 20" aria-hidden="true"><path d="M5 4h.01M11 4h.01M5 10h.01M11 10h.01M5 16h.01M11 16h.01"/></svg>';
     handle.addEventListener("pointerdown", event => {
       if (event.button !== 0) return;
@@ -118,7 +132,7 @@ function renderAttributeSettings() {
       saveAttributeLayout();
     });
     const title = document.createElement("span");
-    title.textContent = name;
+    localize(title, () => { title.textContent = localName(field); });
     label.append(check, title);
     row.append(label);
     for (const [text, direction] of [["↑", -1], ["↓", 1]]) {
@@ -126,8 +140,10 @@ function renderAttributeSettings() {
       button.type = "button";
       button.className = "icon-button";
       button.textContent = text;
-      button.title = direction < 0 ? "上移" : "下移";
-      button.setAttribute("aria-label", name + button.title);
+      localize(button, () => {
+        button.title = translate(direction < 0 ? "Move up" : "Move down");
+        button.setAttribute("aria-label", translate(direction < 0 ? "Move {0} up" : "Move {0} down", localName(field)));
+      });
       button.disabled = !names[index + direction];
       button.addEventListener("click", () => moveAttribute(name, direction, text));
       row.append(button);

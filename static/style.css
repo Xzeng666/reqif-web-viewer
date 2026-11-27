@@ -29,6 +29,35 @@ body {
 .btn:disabled { opacity: .6; cursor: wait; }
 .btn:hover { background: #2559b8; }
 
+.top-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+#languageMenu { position: relative; }
+.language-trigger {
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+  height: 30px; padding: 0 7px; border: 1px solid #587196; border-radius: 4px;
+  color: inherit; cursor: pointer; list-style: none;
+}
+.language-trigger::-webkit-details-marker { display: none; }
+.language-trigger:hover, #languageMenu[open] .language-trigger { background: #2b4b74; }
+.language-trigger:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.language-trigger svg, .language-auto { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+.language-trigger::after {
+  content: ""; width: 4px; height: 4px; border: solid currentColor; border-width: 0 1px 1px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.language-options {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 120; width: 164px;
+  padding: 4px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: #24292f;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .15);
+}
+.language-options button {
+  display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 8px;
+  border: 0; border-radius: 4px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.language-options button:hover, .language-options button[aria-pressed="true"] { background: #eef4ff; }
+.language-options button[aria-pressed="true"]::after { content: "✓"; margin-left: auto; color: #2f6fdb; }
+.language-options svg { width: 20px; flex: none; }
+.language-options .flag { height: 14px; border-radius: 2px; }
+
 #filterBar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
   position: relative; max-width: 58%;
@@ -152,6 +181,7 @@ body {
 }
 .node-row:hover { background: #eef4ff; }
 .node-row.active { background: #dbe9ff; }
+.node-label { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
 .node-row .caret {
   flex: none; width: 14px; text-align: center; color: #6a737d; font-size: 10px;
   cursor: pointer; transition: transform .1s;
@@ -161,11 +191,15 @@ body {
   white-space: nowrap; }
 .node-row .ttl { color: #24292f; font-size: 13px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
-.node-row .rid { color: #8b949e; font-family: Consolas, monospace; font-size: 11px; }
+.node-row .rid {
+  color: #8b949e; font-family: Consolas, monospace; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .node-children { margin-left: 16px; border-left: 1px solid #e8ebef; }
 .badge {
   flex: none; font-size: 10px; padding: 1px 6px; border-radius: 8px;
   background: #eaeef2; color: #57606a;
+  max-width: 45%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .badge.heading { background: #fff3cd; color: #7a5b00; }
 .badge.info { background: #d8f5e3; color: #116329; }
@@ -221,7 +255,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #2f6fdb; out
 .body-hit.current-hit { background: #ffb75e; outline: 2px solid #c45c00; outline-offset: 1px; }
 .enum-value { display: inline-block; padding: 1px 7px; margin: 1px 4px 1px 0; border-radius: 10px; background: #eef4ff; }
 .default-value { display: inline-block; color: #57606a; margin-left: 8px; font-size: 11px; }
-.display-label { color: #57606a; font-size: 11px; }
+.display-label { color: #57606a; font-size: 11px; white-space: nowrap; }
 .rich img[data-image]:not([src]) {
   min-width: 2em; min-height: 1.4em; background: #f6f8fa; color: #57606a;
 }
@@ -230,7 +264,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #2f6fdb; out
   text-decoration: underline; cursor: pointer;
 }
 .rich button[data-download]:disabled { color: #57606a; cursor: wait; }
-.rich .download-error::after { content: "（读取失败）"; color: #a12822; }
+.rich .download-error::after { content: " (" attr(data-error) ")"; color: #a12822; }
 .rich pre, .rich code { background: #f6f8fa; border-radius: 4px;
   font-family: Consolas, monospace; font-size: 13px; }
 .rich pre { padding: 10px; overflow-x: auto; }
@@ -241,7 +275,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #2f6fdb; out
 }
 .rel-list { list-style: none; padding: 0; margin: 6px 0; }
 .rel-list li { padding: 4px 0; border-bottom: 1px dashed #e8ebef; font-size: 13px; }
-.rel-list .dir { display: inline-block; width: 46px; color: #6a737d; font-size: 11px; }
+.rel-list .dir { display: inline-block; margin-inline-end: 6px; color: #6a737d; font-size: 11px; white-space: nowrap; }
 .related-link {
   border: 0; background: transparent; padding: 0; font: inherit;
   color: #2f6fdb; cursor: pointer; text-decoration: underline;
@@ -508,7 +542,7 @@ button.compare-picker:hover, button.compare-picker.drag { border-color: #2f6fdb;
   width: 16px; height: 16px; margin-right: 4px; border-radius: 4px;
   background: var(--compare-bg); color: var(--compare-color); font: 600 12px/1 Consolas, monospace;
 }
-.node-row[data-compare] .wid { margin-right: 4px; }
+.node-label .compare-mark { margin-right: 0; }
 .doc-block[data-compare] { border-left-color: var(--compare-bg); }
 .doc-block.kind-ghost { background: #f6f8fa; color: #57606a; }
 .doc-block.kind-ghost.active { background: #eef4ff; }
@@ -534,17 +568,23 @@ button.compare-picker:hover, button.compare-picker.drag { border-color: #2f6fdb;
   #mediaDialog { width: 94vw; height: 86vh; }
 }
 @media (max-width: 420px) {
-  #topbar:has(:where(#viewSelect:not(.hidden))) {
+  #topbar {
+    padding-inline: 10px; gap: 8px;
     display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand open";
+  }
+  #topbar .brand { font-size: 14px; gap: 6px; }
+  #topbar:has(:where(#viewSelect:not(.hidden))) {
     grid-template-areas: "brand open" "file view" "filters filters";
   }
   #topbar.comparing { grid-template-areas: "brand open" "filters view"; }
-  #topbar.comparing #fileInfo { display: none; }
+  #topbar #fileInfo:empty { display: none; }
   #topbar.comparing #searchInput { width: min(150px, 40vw); }
   #topbar .brand { grid-area: brand; }
   #topbar #fileInfo { grid-area: file; }
   #topbar #viewSelect { grid-area: view; }
-  #topbar #btnOpen { grid-area: open; padding-inline: 9px; }
+  #topbar .top-actions { grid-area: open; }
+  #topbar #btnOpen { padding-inline: 9px; }
   #topbar #filterBar { grid-area: filters; }
   #statusbar:has(#compareTools:not(.hidden)) { padding-inline: 10px; }
   #compareSummary { gap: 0; }

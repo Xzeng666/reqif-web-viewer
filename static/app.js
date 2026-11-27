@@ -56,7 +56,7 @@ async function openFile(file) {
 function showFileError(error) {
   const message = $("fileMessage");
   message.classList.add("err");
-  message.textContent = error.message || "无法打开文件";
+  localizeText(message, error.message || "Can't open file");
   show("fileMessage", true);
 }
 
@@ -71,12 +71,15 @@ async function withLoading(title, task) {
   show("loadingNote", false);
   dialog.title = title;
   let lastStage = "", lastUpdate = 0;
-  const progress = async (stage, completed = 0, total = 0) => {
+  const progress = async (stage, completed = 0, total = 0, version = "") => {
     const now = performance.now();
-    if (stage === lastStage && completed !== total && now - lastUpdate < 32) return;
-    lastStage = stage;
+    const phase = version + stage;
+    if (phase === lastStage && completed !== total && now - lastUpdate < 32) return;
+    lastStage = phase;
     lastUpdate = now;
-    stageLabel.textContent = stage;
+    localize(stageLabel, () => {
+      stageLabel.textContent = (version ? translate(version) + " · " : "") + translate(stage);
+    });
     if (total) {
       bar.max = total;
       bar.value = completed;
@@ -90,7 +93,7 @@ async function withLoading(title, task) {
   try {
     dialog.showModal();
     await task(progress);
-    await progress("完成", 1, 1);
+    await progress("Done", 1, 1);
   } finally {
     opening = false;
     $("btnOpen").disabled = false;
@@ -128,25 +131,37 @@ async function enterViewer(model, progress, comparison = null) {
   $("viewSelect").classList.remove("hidden");
 
   const { objects, specs, relations, attachments } = model;
-  $("statText").textContent = objects.size + " 个工作项 · " + specs.length + " 个规格" +
-    (relations ? " · " + relations + " 个关联" : "") + (attachments ? " · " + attachments + " 个附件" : "");
+  localize($("statText"), () => {
+    const counts = [translate("Work items: {0}", objects.size), translate("Specifications: {0}", specs.length)];
+    if (relations) counts.push(translate("Relations: {0}", relations));
+    if (attachments) counts.push(translate("Attachments: {0}", attachments));
+    $("statText").textContent = counts.join(" · ");
+  });
   setWarn(model.warnings);
   updateComparisonControls();
-  $("bodySelect").replaceChildren(new Option("自动识别", ""),
-    ...model.bodyFields.map(name => new Option(name, name)));
+  const autoBody = new Option("", "");
+  localizeText(autoBody, "Auto-detect");
+  $("bodySelect").replaceChildren(autoBody, ...model.bodyFields.map(({ name, nameKey }) => {
+    const option = new Option(name, name);
+    if (nameKey) localizeText(option, nameKey);
+    return option;
+  }));
   initAttributeLayout();
   resetDocument();
   await renderTree(specs, progress);
   filterComparisonOutline();
-  await progress("生成文档");
+  await progress("Building document");
   switchView($("viewSelect").value);
 }
 
 function setWarn(warnings) {
   var el = $("statWarn");
   if (warnings && warnings.length) {
-    el.textContent = "⚠ " + warnings.join("；");
-    el.title = warnings.join("\n");
+    localize(el, () => {
+      const messages = warnings.map(message => translate(...message));
+      el.textContent = "⚠ " + messages.join(" · ");
+      el.title = messages.join("\n");
+    });
     show("statWarn", true);
   } else {
     show("statWarn", false);
@@ -164,7 +179,7 @@ function locationPath(location) {
     const { title, wid, rid } = parent.node;
     if (!parent.node.docTitle) names.push(title || wid || rid);
   }
-  names.push(location.specName);
+  names.push(localName(location.spec));
   return names.reverse().filter((name, index, all) => index === 0 || name !== all[index - 1]).join(" / ");
 }
 
@@ -308,29 +323,29 @@ async function renderTree(specs, progress) {
   const host = document.createDocumentFragment();
   const count = nodes => nodes.reduce((total, node) => total + 1 + count(node.children), 0);
   const total = specs.reduce((sum, spec) => sum + count(spec.tree), 0);
-  await progress("生成目录", 0, total);
+  await progress("Building outline", 0, total);
   for (const spec of specs) {
     const section = document.createElement("div");
     const heading = document.createElement("div");
     heading.className = "spec-name";
-    heading.textContent = spec.name;
+    localize(heading, () => { heading.textContent = localName(spec); });
     section.appendChild(heading);
     host.appendChild(section);
     const pending = spec.tree.slice().reverse().map(node => ({ node, parent: null, host: section }));
     while (pending.length) {
       const { node, parent, host: target } = pending.pop();
-      target.appendChild(buildNode(node, parent, spec.name));
+      target.appendChild(buildNode(node, parent, spec));
       const entry = STATE.nodes.get(node.key);
       for (let index = node.children.length - 1; index >= 0; index--) {
         pending.push({ node: node.children[index], parent: entry, host: entry.kids });
       }
-      await progress("生成目录", STATE.nodes.size, total);
+      await progress("Building outline", STATE.nodes.size, total);
     }
   }
   $("tree").replaceChildren(host);
 }
 
-function buildNode(n, parent, specName) {
+function buildNode(n, parent, spec) {
   var wrap = document.createElement("div");
   var row = document.createElement("div");
   row.className = "node-row";
@@ -342,12 +357,13 @@ function buildNode(n, parent, specName) {
   caret.textContent = hasKids ? "▶" : "";
   row.appendChild(caret);
 
-  var label = document.createElement("span");
+  const label = document.createElement("span");
+  label.className = "node-label";
   markComparison(row, n.rid, label);
   if (n.docTitle) {
     const label = document.createElement("span");
     label.className = "display-label";
-    label.textContent = "文档";
+    localizeText(label, "Document");
     row.appendChild(label);
   } else if (n.wid) {
     var w = document.createElement("span");
@@ -358,25 +374,27 @@ function buildNode(n, parent, specName) {
     var r = document.createElement("span");
     r.className = "rid";
     const rid = STATE.comparison?.byRid.get(n.rid)?.id ?? n.rid;
-    r.textContent = "内部:" + rid.slice(0, 13) + "…";
+    localizeText(r, "Internal ID {0}", rid.slice(0, 13) + "…");
     label.appendChild(r);
   }
   var t = document.createElement("span");
   t.className = "ttl";
-  t.textContent = n.title || "(无标题)";
+  if (n.title) t.textContent = n.title;
+  else localizeText(t, "(Untitled)");
   t.title = n.title || "";
   label.appendChild(t);
 
   var badge = document.createElement("span");
-  var tn = (n.type_name || "").toLowerCase();
-  badge.className = "badge" + (tn === "heading" ? " heading" : tn.indexOf("info") >= 0 ? " info" : "");
-  badge.textContent = n.docTitle ? "展示节点" : n.type_name || "";
+  badge.className = "badge" + typeBadgeClass(n.type_name);
+  if (n.docTitle) localizeText(badge, "Display node");
+  else if (n.type_name) badge.textContent = n.type_name;
+  else localizeText(badge, "(Unknown type)");
   label.appendChild(badge);
 
   row.appendChild(label);
 
   const kids = hasKids ? document.createElement("div") : null;
-  const entry = { node: n, parent, specName, kids, caret, row };
+  const entry = { node: n, parent, spec, kids, caret, row };
   STATE.nodes.set(n.key, entry);
   if (!STATE.firstNode.has(n.rid)) STATE.firstNode.set(n.rid, entry);
   if (kids) kids.className = "node-children";
@@ -505,7 +523,7 @@ function renderAttrsInto(d, it, body = [], includeBody = false) {
   for (const attribute of [...(includeBody ? body : []), ...additional]) {
     const heading = document.createElement("div");
     heading.className = "section-h";
-    heading.textContent = attribute.name;
+    localize(heading, () => { heading.textContent = localName(attribute); });
     d.append(heading, renderBody(attribute, includeBody && body.includes(attribute) ? "detail" : null,
       body.indexOf(attribute)));
   }
@@ -513,7 +531,7 @@ function renderAttrsInto(d, it, body = [], includeBody = false) {
   if (it.related && it.related.length) {
     var rh = document.createElement("div");
     rh.className = "section-h";
-    rh.textContent = "关联关系";
+    localizeText(rh, "Relations");
     d.appendChild(rh);
     var ul = document.createElement("ul");
     ul.className = "rel-list";
@@ -521,13 +539,14 @@ function renderAttrsInto(d, it, body = [], includeBody = false) {
       var li = document.createElement("li");
       var dir = document.createElement("span");
       dir.className = "dir";
-      dir.textContent = r.dir === "out" ? "→ 源出" : "← 指向";
+      localizeText(dir, r.dir === "out" ? "→ Outgoing" : "← Incoming");
       li.appendChild(dir);
       const other = STATE.model.objects.get(r.rid);
       const link = document.createElement("button");
       link.type = "button";
       link.className = "related-link";
-      link.textContent = other?.wid || "内部：" + r.rid;
+      if (other?.wid) link.textContent = other.wid;
+      else localizeText(link, "Internal ID {0}", r.rid);
       link.addEventListener("click", () => openItem(r.rid));
       li.appendChild(link);
       if (other?.title) li.append("　" + other.title);
@@ -550,7 +569,9 @@ function renderDetail(it, rid) {
   var h1 = document.createElement("h1");
   if (!it) {
     h1.textContent = rid;
-    d.append(h1, "该引用在文件中没有对应的工作项");
+    const notice = document.createElement("p");
+    localizeText(notice, "This reference has no work item in the file");
+    d.append(h1, notice);
     return;
   }
   if (it.displayOnly) {
@@ -564,13 +585,16 @@ function renderDetail(it, rid) {
     renderComparisonDetail(d, comparison);
     return;
   }
-  h1.textContent = (it.wid || "内部标识 " + it.rid) + (it.title ? "　" + it.title : "");
+  localize(h1, () => {
+    h1.textContent = [it.wid || translate("Internal ID {0}", it.rid), it.title].filter(Boolean).join("　");
+  });
   d.appendChild(h1);
 
   var meta = document.createElement("div");
   meta.className = "meta";
-  meta.innerHTML = "类型: <b>" + esc(it.type_name) + "</b>" +
-    (it.fallback ? " · <b>提示：该工作项无 Work Item ID，以上为内部标识</b>" : "");
+  localize(meta, () => {
+    meta.innerHTML = esc(translate("Type")) + " · <b>" + esc(typeCaption(it.type_name)) + "</b>";
+  });
   d.appendChild(meta);
 
   renderAttrsInto(d, it, bodyAttributes(it, $("bodySelect").value), true);
@@ -579,7 +603,7 @@ function renderDetail(it, rid) {
 function displayNotice() {
   const notice = document.createElement("div");
   notice.className = "meta";
-  notice.textContent = "文档标题由规格名称补充，仅用于展示。";
+  localizeText(notice, "Display title taken from the specification name.");
   return notice;
 }
 
@@ -607,7 +631,7 @@ async function loadImage(image) {
     if (image.isConnected) {
       const notice = document.createElement("span");
       notice.className = "miss-attach";
-      notice.textContent = "无法预览 " + image.alt;
+      localize(notice, () => { notice.textContent = translate("Can't preview {0}", image.alt); });
       image.replaceWith(notice);
     }
   }
@@ -696,7 +720,7 @@ function buildDoc(items) {
   for (const height of DOC.heights) DOC.offs.push(DOC.offs[DOC.offs.length - 1] + height);
   DOC.total = DOC.offs[items.length];
   $("docSpacer").style.height = DOC.total + "px";
-  $("docEmpty").textContent = STATE.comparison ? "没有符合筛选条件的工作项" : "当前文件没有可显示的文档内容";
+  localizeText($("docEmpty"), STATE.comparison ? "No work items match the filters" : "No document content to display");
   show("docEmpty", !items.length);
 }
 
@@ -775,7 +799,8 @@ function makeBlock(i) {
     }
     var t = document.createElement("span");
     t.className = "doc-title";
-    t.textContent = it.title || "(无标题)";
+    if (it.title) t.textContent = it.title;
+    else localizeText(t, "(Untitled)");
     t.title = it.title || "";
     head.appendChild(t);
     if (it.wid && !it.docTitle) {
@@ -786,8 +811,8 @@ function makeBlock(i) {
     }
     el.appendChild(head);
   } else {
-    var capText = it.caption || (it.kind === "plain" && !it.title ? "（无描述内容）" : "");
-    if (it.wid || capText) {
+    const emptyCaption = it.kind === "plain" && !it.title;
+    if (it.wid || it.caption || emptyCaption) {
       var head2 = document.createElement("div");
       head2.className = "doc-head";
       if (it.wid) {
@@ -797,10 +822,11 @@ function makeBlock(i) {
         w2.title = "ReqIF.ForeignID: " + it.wid;
         head2.appendChild(w2);
       }
-      if (capText) {
-        var c2 = document.createElement("span");
+      if (it.caption || emptyCaption) {
+        const c2 = document.createElement("span");
         c2.className = "doc-caption";
-        c2.textContent = capText;
+        if (emptyCaption) localizeText(c2, "(No description)");
+        else c2.textContent = it.caption;
         head2.appendChild(c2);
       }
       el.appendChild(head2);
@@ -943,7 +969,8 @@ function renderResults(items, query) {
   const list = document.createDocumentFragment();
   const summary = document.createElement("div");
   summary.className = "result-count";
-  summary.textContent = items.length ? "匹配 " + items.length + " 项" : "没有匹配的工作项";
+  if (items.length) localizeText(summary, "Matches: {0}", items.length);
+  else localizeText(summary, "No matching work items");
   list.append(summary);
   const pattern = queryPattern(query);
 
@@ -955,22 +982,25 @@ function renderResults(items, query) {
     row.dataset.rid = item.rid;
     const id = document.createElement("span");
     id.className = "wid";
-    id.textContent = item.displayOnly ? "文档标题 · 展示节点" :
-      STATE.comparison?.byRid.get(item.rid)?.id || item.wid || item.rid;
+    if (item.displayOnly) localizeText(id, "Document title · Display node");
+    else id.textContent = STATE.comparison?.byRid.get(item.rid)?.id || item.wid || item.rid;
     markComparison(id, item.rid);
     const title = document.createElement("span");
     title.className = "res-title";
-    title.textContent = item.title || "（无标题）";
+    if (item.title) title.textContent = item.title;
+    else localizeText(title, "(Untitled)");
     const path = document.createElement("span");
     path.className = "result-path";
-    path.textContent = location ? locationPath(location) : "未列入规格目录";
-    path.title = path.textContent;
+    localize(path, () => {
+      path.textContent = location ? locationPath(location) : translate("Outside the outline");
+      path.title = path.textContent;
+    });
     row.append(id, title, path);
     if (match) {
       const snippet = document.createElement("span");
       snippet.className = "result-snippet";
       const field = document.createElement("strong");
-      field.textContent = match.name + "　";
+      localize(field, () => { field.textContent = localName(match) + "　"; });
       snippet.append(field, resultExcerpt(match.value, pattern));
       row.append(snippet);
     }
@@ -1013,7 +1043,7 @@ function filterFields(model, previous) {
     }
   }
   const type = fields.get("Type") ?? {
-    name: "Type", kind: "enumeration", objectType: true,
+    name: "Type", nameKey: "Type", kind: "enumeration", objectType: true,
     values: [...new Set(Array.from(model.objects.values(), item => item.type_name))].sort(),
   };
   fields.delete(type.name);
@@ -1028,26 +1058,25 @@ function toggleFilterMenu() {
   fm.innerHTML = "";
   var head = document.createElement("div");
   head.className = "menu-head";
-  head.textContent = "选择筛选字段";
+  localizeText(head, "Select a filter field");
   fm.appendChild(head);
   const added = new Set(STATE.filters.map(filter => filter.attr));
   const list = filterFields(STATE.model, STATE.comparison?.before).filter(field => !added.has(field.name));
   if (!list.length) {
     var e0 = document.createElement("div");
     e0.className = "menu-item";
-    e0.textContent = "没有更多可筛选的属性";
+    localizeText(e0, "No more fields to filter");
     fm.appendChild(e0);
   }
   list.forEach(function (a) {
     var it = document.createElement("div");
     it.className = "menu-item";
     var nm = document.createElement("span");
-    nm.textContent = a.name;
-    nm.title = a.name;
+    localize(nm, () => { nm.textContent = nm.title = localName(a); });
     it.appendChild(nm);
     var k = document.createElement("span");
     k.className = "k";
-    k.textContent = a.kind === "enumeration" && a.values.length ? "▼ 下拉" : "✎ 文本";
+    localizeText(k, a.kind === "enumeration" && a.values.length ? "▼ List" : "✎ Text");
     it.appendChild(k);
     it.addEventListener("click", function () {
       show("filterMenu", false);
@@ -1071,24 +1100,27 @@ function addFilterChip(def) {
   chip.className = "filter-chip";
   const label = document.createElement("span");
   label.className = "chip-label";
-  label.textContent = def.name;
-  label.title = def.name;
+  localize(label, () => { label.textContent = label.title = localName(def); });
   chip.appendChild(label);
   if (isEnum) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "chip-val";
-    button.textContent = "选择…";
-    button.title = def.name;
+    const update = () => {
+      const selected = filter.value.map(typeCaption).join(translate(" or "));
+      button.textContent = selected || translate("Select…");
+      button.title = selected ? localName(def) + " · " + selected : localName(def);
+    };
+    localize(button, update);
     chip.append(button);
     button.addEventListener("click", event => {
       event.stopPropagation();
-      openComboMenu(filter, button, def.values);
+      openComboMenu(filter, button, def, update);
     });
   } else {
     const input = document.createElement("input");
     input.className = "chip-input";
-    input.placeholder = "包含…";
+    localize(input, () => { input.placeholder = translate("Contains…"); });
     input.addEventListener("input", () => {
       filter.value = input.value.trim();
       scheduleFilterQuery();
@@ -1099,7 +1131,7 @@ function addFilterChip(def) {
   remove.type = "button";
   remove.className = "chip-x";
   remove.textContent = "×";
-  remove.title = "移除筛选";
+  localize(remove, () => { remove.title = translate("Remove filter"); });
   remove.addEventListener("click", () => {
     STATE.filters = STATE.filters.filter(item => item !== filter);
     chip.remove();
@@ -1110,7 +1142,7 @@ function addFilterChip(def) {
   $("filterChips").append(chip);
 }
 
-function openComboMenu(filter, anchor, options) {
+function openComboMenu(filter, anchor, definition, update) {
   const menu = $("comboMenu");
   const toggling = !menu.classList.contains("hidden") && menu._owner === filter;
   show("comboMenu", !toggling);
@@ -1119,19 +1151,21 @@ function openComboMenu(filter, anchor, options) {
   const search = document.createElement("div");
   search.className = "menu-search";
   const input = document.createElement("input");
-  input.placeholder = "搜索选项…";
-  input.setAttribute("aria-label", "搜索 " + filter.attr + " 选项");
+  localize(input, () => {
+    input.placeholder = translate("Search options…");
+    input.setAttribute("aria-label", translate("Search options for {0}", localName(definition)));
+  });
   search.append(input);
   const list = document.createElement("div");
   menu.replaceChildren(search, list);
   function renderOptions() {
     list.replaceChildren();
     const keyword = input.value.trim().toLowerCase();
-    const shown = options.filter(value => value.toLowerCase().includes(keyword));
+    const shown = definition.values.filter(value => typeCaption(value).toLowerCase().includes(keyword));
     if (!shown.length) {
       const empty = document.createElement("div");
       empty.className = "menu-item";
-      empty.textContent = "无匹配选项";
+      localizeText(empty, "No matching options");
       list.append(empty);
     }
     for (const value of shown) {
@@ -1141,15 +1175,12 @@ function openComboMenu(filter, anchor, options) {
       checkbox.type = "checkbox";
       checkbox.checked = filter.value.includes(value);
       const label = document.createElement("span");
-      label.textContent = value;
-      label.title = value;
+      localize(label, () => { label.textContent = label.title = typeCaption(value); });
       option.append(checkbox, label);
       checkbox.addEventListener("change", () => {
         if (checkbox.checked) filter.value.push(value);
         else filter.value = filter.value.filter(item => item !== value);
-        const selected = filter.value.join(" 或 ");
-        anchor.textContent = selected || "选择…";
-        anchor.title = selected ? filter.attr + "：" + selected : filter.attr;
+        update();
         runQuery();
       });
       list.append(option);
@@ -1191,7 +1222,10 @@ function renderStats(s) {
   var b = $("statsBody");
   b.innerHTML = "";
   var tbl = document.createElement("table");
-  tbl.innerHTML = "<tr><th>项目</th><th class=\"num\">数量</th></tr>";
+  tbl.innerHTML = '<tr><th></th><th class="num"></th></tr>';
+  const [item, count] = tbl.querySelectorAll("th");
+  localizeText(item, "Item");
+  localizeText(count, "Count");
   var addRow = function (label, val, cls, badge) {
     var tr = document.createElement("tr");
     if (cls) tr.className = cls;
@@ -1199,10 +1233,10 @@ function renderStats(s) {
     if (badge) {
       var sp = document.createElement("span");
       sp.className = "type-badge" + typeBadgeClass(label);
-      sp.textContent = label;
+      localize(sp, () => { sp.textContent = typeCaption(label); });
       td1.appendChild(sp);
     } else {
-      td1.textContent = label;
+      localizeText(td1, label);
     }
     var td2 = document.createElement("td");
     td2.className = "num";
@@ -1210,18 +1244,19 @@ function renderStats(s) {
     tr.appendChild(td1); tr.appendChild(td2);
     tbl.appendChild(tr);
   };
-  addRow("工作项总数", s.objects, "stat-sum");
+  addRow("Total work items", s.objects, "stat-sum");
   s.types.forEach(function (t) { addRow(t.name, t.count, "", true); });
   addRow("Specifications", s.specs);
-  if (s.relations) addRow("关联关系", s.relations);
-  addRow("附件", s.attachments);
+  if (s.relations) addRow("Relations", s.relations);
+  addRow("Attachments", s.attachments);
   b.appendChild(tbl);
   var src = document.createElement("div");
   src.className = "muted-line";
-  src.textContent = "文件：" + s.source;
+  localizeText(src, "File: {0}", s.source);
   b.appendChild(src);
 }
 
+initLanguage();
 initFileInput();
 initComparison();
 initMedia();

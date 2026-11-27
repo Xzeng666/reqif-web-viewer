@@ -1,6 +1,6 @@
 # ReqIF Web Viewer
 
-[English](README.md) · **简体中文**
+[English](README.md) · **简体中文** · [Deutsch](README.de.md)
 
 在浏览器中只读查看本机的 ReqIF / ReqIFz 文件，支持查看需求、搜索正文和版本对比。
 

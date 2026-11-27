@@ -5,15 +5,16 @@ function initComparison() {
   const actions = $("compareActions");
   const trigger = $("compareActionTrigger");
   const fields = [
-    { side: "before", label: "旧版", input: $("compareOldFile"), button: $("chooseCompareOld") },
-    { side: "after", label: "新版", input: $("compareNewFile"), button: $("chooseCompareNew") },
+    { side: "before", label: "Old version", input: $("compareOldFile"), button: $("chooseCompareOld") },
+    { side: "after", label: "New version", input: $("compareNewFile"), button: $("chooseCompareNew") },
   ];
   let versions;
 
   function updatePicker() {
     for (const { side, button } of fields) {
       button.title = versions[side]?.name ?? versions[side]?.source ?? "";
-      button.querySelector(".compare-file-name").textContent = button.title || "拖入或选择文件";
+      const name = button.querySelector(".compare-file-name");
+      localize(name, () => { name.textContent = button.title || translate("Drop or select a file"); });
     }
     $("startCompare").disabled = !versions.before || !versions.after;
   }
@@ -24,8 +25,11 @@ function initComparison() {
     updatePicker();
     dialog.showModal();
   }
-  function pickerError(message) {
-    $("compareError").textContent = message;
+  function pickerError(message, version = "") {
+    const notice = $("compareError");
+    localize(notice, () => {
+      notice.textContent = (version ? translate(version) + " · " : "") + translate(message);
+    });
     show("compareError", true);
   }
 
@@ -53,7 +57,7 @@ function initComparison() {
       event.stopPropagation();
       button.classList.remove("drag");
       if (event.dataTransfer.files.length === 1) select(event.dataTransfer.files[0]);
-      else pickerError("每个版本请选择一个文件。");
+      else pickerError("Select one file per version.");
     });
   }
 
@@ -80,22 +84,20 @@ function initComparison() {
     if (opening || !versions?.before || !versions.after) return;
     const selected = versions;
     const loaded = [];
+    let version = "";
     dialog.close();
     try {
-      await withLoading("版本对比", async progress => {
+      await withLoading(translate("Compare versions"), async progress => {
         const sources = [];
         for (const { side, label } of fields) {
           const value = selected[side];
-          await progress("读取" + label);
-          try {
-            sources.push(value instanceof File ? await inspectReqif(value) : value);
-          } catch (error) {
-            throw new Error(label + " · " + error.message);
-          }
+          version = label;
+          await progress("Reading file", 0, 0, label);
+          sources.push(value instanceof File ? await inspectReqif(value) : value);
         }
         const size = sources.reduce((total, source) => total + source.xmlSize, 0);
         if (size >= 128 * 1024 * 1024) {
-          $("loadingNote").textContent = "两份 XML 共 " + Math.round(size / 1024 / 1024) + " MiB，加载可能需要一些时间。";
+          localizeText($("loadingNote"), "The two XML files total {0} MiB. Loading may take a while.", Math.round(size / 1024 / 1024));
           show("loadingNote", true);
         }
         const models = [];
@@ -105,22 +107,19 @@ function initComparison() {
             continue;
           }
           const { label } = fields[index];
-          try {
-            const model = await readReqifSource(source, (stage, done, total) =>
-              progress(label + " · " + stage, done, total));
-            loaded.push(model);
-            models.push(model);
-          } catch (error) {
-            throw new Error(label + " · " + error.message);
-          }
+          version = label;
+          const model = await readReqifSource(source, (stage, done, total) => progress(stage, done, total, label));
+          loaded.push(model);
+          models.push(model);
         }
+        version = "";
         const result = await buildComparison(models[0], models[1], progress);
         await enterViewer(result.model, progress, result);
       });
       trigger.focus();
     } catch (error) {
       versions = selected;
-      pickerError(error.message || "无法对比文件");
+      pickerError(error.message || "Can't compare files", version);
       dialog.showModal();
     } finally {
       for (const model of loaded) {
@@ -180,7 +179,7 @@ function updateComparisonControls() {
 
 function comparisonCountLabel(status, count) {
   const [symbol, label] = compareStates[status];
-  return (symbol ? symbol + " " : "") + count + " " + label;
+  return (symbol ? symbol + " " : "") + count + " " + translate(label);
 }
 
 function updateComparisonSummary(results = null) {
@@ -194,7 +193,7 @@ function updateComparisonSummary(results = null) {
   for (const button of $("compareSummary").children) {
     const status = button.dataset.compare;
     const selected = status === filter;
-    button.textContent = comparisonCountLabel(status, totals[status]);
+    localize(button, () => { button.textContent = comparisonCountLabel(status, totals[status]); });
     button.disabled = totals[status] === 0 && !selected;
     button.setAttribute("aria-pressed", String(selected));
   }
@@ -261,8 +260,10 @@ function markComparison(element, rid, host = element) {
   const mark = document.createElement("span");
   element.dataset.compare = mark.dataset.compare = entry.status;
   mark.className = "compare-mark";
-  mark.title = label;
-  mark.setAttribute("aria-label", label);
+  localize(mark, () => {
+    mark.title = translate(label);
+    mark.setAttribute("aria-label", mark.title);
+  });
   mark.textContent = symbol;
   (host ?? element).prepend(mark);
 }
@@ -270,7 +271,7 @@ function markComparison(element, rid, host = element) {
 function comparisonValues(entry, { before, after }) {
   const render = ([prefix, change, suffix], tag) => {
     const highlight = change ? `<${tag}>${esc(change)}</${tag}>` : "";
-    return esc(prefix) + highlight + esc(suffix) || "空值";
+    return esc(prefix) + highlight + esc(suffix) || translate("Empty");
   };
   if (!entry.before) return [render(["", after, ""], "ins")];
   if (!entry.after) return [render(["", before, ""], "del")];
@@ -281,24 +282,29 @@ function comparisonValues(entry, { before, after }) {
 function renderComparisonDetail(host, entry) {
   const summary = document.createElement("p");
   summary.className = "compare-detail-status";
-  summary.textContent = compareStates[entry.status][1];
+  const label = document.createElement("span");
+  localizeText(label, compareStates[entry.status][1]);
+  summary.append(label);
   markComparison(summary, entry.rid);
   host.append(summary);
   if (entry.duplicateId || entry.status === "removed") {
     const note = document.createElement("p");
     note.className = "muted";
-    note.textContent = entry.duplicateId ? duplicateIdNote : oldOnlyNote;
+    localizeText(note, entry.duplicateId ? duplicateIdNote : oldOnlyNote);
     host.append(note);
   }
-  if (entry.before && entry.after) {
-    host.insertAdjacentHTML("beforeend",
-      '<div class="compare-values compare-column-labels"><strong>旧版</strong><strong>新版</strong></div>');
-  }
-  const fields = comparisonFields(entry).map(field => {
-    const cells = comparisonValues(entry, field).map(value => `<div>${value}</div>`).join("");
-    return `<section class="compare-field"><h3>${esc(field.name)}</h3><div class="compare-values">${cells}</div></section>`;
+  const content = document.createElement("div");
+  localize(content, () => {
+    const labels = entry.before && entry.after
+      ? `<div class="compare-values compare-column-labels"><strong>${translate("Old version")}</strong><strong>${translate("New version")}</strong></div>`
+      : "";
+    const fields = comparisonFields(entry).map(field => {
+      const cells = comparisonValues(entry, field).map(value => `<div>${value}</div>`).join("");
+      return `<section class="compare-field"><h3>${esc(field.name)}</h3><div class="compare-values">${cells}</div></section>`;
+    });
+    content.innerHTML = labels + fields.join("");
   });
-  host.insertAdjacentHTML("beforeend", fields.join(""));
+  host.append(content);
 }
 
 function quoteCsv(value) {
@@ -310,20 +316,20 @@ function quoteCsv(value) {
 function csvComparisonRow(entry) {
   const { before, after } = entry;
   const fields = before && after ? comparisonFields(entry) : [{
-    name: "标题", before: before?.title, after: after?.title,
+    name: translate("Title"), before: before?.title, after: after?.title,
   }];
   const summary = side => fields.map(field => (field[side] ?? "").replace(/\s+/g, " ").slice(0, 140)).join(" | ");
-  return [entry.id, compareStates[entry.status][1], (after ?? before).title,
+  return [entry.id, translate(compareStates[entry.status][1]), (after ?? before).title,
     fields.map(field => field.name).join("、"), summary("before"), summary("after")].map(quoteCsv).join(",") + "\r\n";
 }
 
 function htmlComparisonRow(entry) {
   const title = esc(entry.id + " · " + (entry.after ?? entry.before).title);
-  const label = compareStates[entry.status][1];
+  const label = translate(compareStates[entry.status][1]);
   const fields = comparisonFields(entry).map(field => {
     const columns = comparisonValues(entry, field).map((value, index, values) => {
       if (values.length === 1) return `<div>${value}</div>`;
-      return `<div><small>${index ? "新版" : "旧版"}</small><div>${value}</div></div>`;
+      return `<div><small>${translate(index ? "New version" : "Old version")}</small><div>${value}</div></div>`;
     });
     return "<section><h3>" + esc(field.name) + '</h3><div class="values">' + columns.join("") + "</div></section>";
   });
@@ -333,9 +339,10 @@ function htmlComparisonRow(entry) {
 function htmlComparisonHeader(result) {
   const counts = Object.keys(compareStates).map(status =>
     comparisonCountLabel(status, result.counts[status])).join(" · ");
-  const notes = result.notes.map(note => "<li>" + esc(note) + "</li>").join("");
-  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ReqIF 版本对比</title><style>
+  const notes = result.notes.map(note => "<li>" + esc(translate(...note)) + "</li>").join("");
+  const title = translate("ReqIF version comparison");
+  return `<!doctype html><html lang="${document.documentElement.lang}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title><style>
 body{margin:24px auto;padding:0 16px;max-width:1100px;font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;color:#24292f}
 h1{color:#1f3a5f}details{border:1px solid #d0d7de;border-radius:6px;margin:8px 0;padding:8px 12px}
 summary{cursor:pointer}summary b{color:#1f3a5f}h3{font-size:14px;margin:10px 0 4px}
@@ -344,8 +351,8 @@ summary{cursor:pointer}summary b{color:#1f3a5f}h3{font-size:14px;margin:10px 0 4
 .values>:only-child{grid-column:1/-1}
 small{color:#57606a}del{background:#ffebe9;color:#a12822}ins{background:#dafbe1;color:#116329;text-decoration:none}
 @media(max-width:520px){.values{grid-template-columns:1fr}}
-</style><body><h1>ReqIF 版本对比</h1>
-<p>旧版 ${esc(result.before.source)} → 新版 ${esc(result.after.source)}</p><p>${counts}</p>
+</style><body><h1>${title}</h1>
+<p>${translate("Old version")} ${esc(result.before.source)} → ${translate("New version")} ${esc(result.after.source)}</p><p>${counts}</p>
 ${notes ? "<ul>" + notes + "</ul>" : ""}`;
 }
 
@@ -355,14 +362,15 @@ async function exportComparison(format) {
   const csv = format === "csv";
   const entries = result.entries.filter(entry => entry.status !== "unchanged");
   try {
-    await withLoading(csv ? "导出 CSV" : "HTML 报告", async progress => {
-      const parts = [csv ? "\uFEFFID,状态,标题,变化字段,旧值摘要,新值摘要\r\n" : htmlComparisonHeader(result)];
+    await withLoading(translate(csv ? "Export CSV" : "HTML report"), async progress => {
+      const headers = ["ID", "Status", "Title", "Changed fields", "Old value summary", "New value summary"];
+      const parts = [csv ? "\uFEFF" + headers.map(text => translate(text)).join(",") + "\r\n" : htmlComparisonHeader(result)];
       const row = csv ? csvComparisonRow : htmlComparisonRow;
       for (const [index, entry] of entries.entries()) {
         parts.push(row(entry));
-        await progress("生成报告", index + 1, entries.length);
+        await progress("Generating report", index + 1, entries.length);
       }
-      if (!csv) parts.push(entries.length ? "</body></html>" : "<p>未发现差异。</p></body></html>");
+      if (!csv) parts.push((entries.length ? "" : "<p>" + translate("No differences found.") + "</p>") + "</body></html>");
       const type = csv ? "text/csv;charset=utf-8" : "text/html;charset=utf-8";
       downloadBlob(new Blob(parts, { type }), "reqif-diff." + format);
     });

@@ -1,13 +1,13 @@
 "use strict";
 
 const compareStates = {
-  added: ["+", "新增"],
-  removed: ["−", "仅旧版"],
-  modified: ["~", "修改"],
-  unchanged: ["", "不变"],
+  added: ["+", "Added"],
+  removed: ["−", "Old only"],
+  modified: ["~", "Modified"],
+  unchanged: ["", "Unchanged"],
 };
-const oldOnlyNote = "仅旧版的工作项可能已删除，也可能未被导出。";
-const duplicateIdNote = "重复的 ForeignID 未自动匹配。";
+const oldOnlyNote = "Items found only in the older file may have been removed or omitted from the export.";
+const duplicateIdNote = "Duplicate ForeignIDs were left unmatched.";
 const identityFields = new Set(["ReqIF.ForeignID", "ReqIF.ForignID", "ReqIF.ChapterName"]);
 
 function groupBy(items, keyFor) {
@@ -186,7 +186,7 @@ function comparisonOutline(before, after, { entries, byBefore, byAfter }, specPa
     unplaced.push({ key: ghostKey--, rid: entry.rid, wid: item.wid, title: item.title,
       type_name: item.type_name, ghost: !entry.after, unplaced: true, children: [] });
   }
-  if (unplaced.length) specs.push({ name: "未列入规格目录", tree: unplaced });
+  if (unplaced.length) specs.push({ name: "Outside the outline", nameKey: "Outside the outline", tree: unplaced });
   return { model: { ...after, objects, displayNodes, specs }, byRid };
 }
 
@@ -200,23 +200,31 @@ function compareBodyText(attribute) {
     element.after("\n");
   }
   for (const element of body.querySelectorAll("td,th")) element.after("  ");
-  for (const image of body.querySelectorAll("img")) image.replaceWith("[" + (image.alt || "图片") + "]");
+  for (const image of body.querySelectorAll("img")) image.replaceWith("[" + (image.alt || "Image") + "]");
   return body.textContent.split("\n").map(line => line.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
 }
 
 function comparableValue(attribute) {
   if (attribute.kind === "enumeration") return [...new Set(attribute.labels)].sort();
-  if (attribute.kind === "boolean") return attributeText(attribute);
+  if (attribute.kind === "boolean") return booleanValue(attribute.value) ?? (attribute.value || "—");
   return compareBodyText(attribute);
 }
 
 function fieldContent(attributes) {
-  if (!attributes) return { text: null, signature: "" };
-  const parts = attributes.map(attribute => [attribute.kind, comparableValue(attribute)]);
-  return {
-    text: parts.map(([, value]) => Array.isArray(value) ? value.join(" · ") : value).join("\n"),
-    signature: JSON.stringify(parts.map(part => JSON.stringify(part)).sort()),
-  };
+  return attributes?.map(attribute => [attribute.kind, comparableValue(attribute)]) ?? null;
+}
+
+function fieldSignature(parts) {
+  return parts ? JSON.stringify(parts.map(part => JSON.stringify(part)).sort()) : "";
+}
+
+function fieldText(parts) {
+  if (!Array.isArray(parts)) return parts;
+  return parts.map(([, value]) => {
+    if (Array.isArray(value)) return value.join(" · ");
+    if (typeof value === "boolean") return translate(value ? "Yes" : "No");
+    return value;
+  }).join("\n");
 }
 
 function matchingFieldValues(before, after) {
@@ -234,9 +242,9 @@ function compareFields(before, after, common) {
   const changes = [];
   const oldId = foreignId(before) || before.rid;
   const newId = foreignId(after) || after.rid;
-  if (oldId !== newId) changes.push({ name: "工作项 ID", before: oldId, after: newId });
-  if (before.title !== after.title) changes.push({ name: "标题", before: before.title, after: after.title });
-  if (before.type_name !== after.type_name) changes.push({ name: "工作项类型", before: before.type_name, after: after.type_name });
+  if (oldId !== newId) changes.push({ nameKey: "Work item ID", before: oldId, after: newId });
+  if (before.title !== after.title) changes.push({ nameKey: "Title", before: before.title, after: after.title });
+  if (before.type_name !== after.type_name) changes.push({ nameKey: "Work item type", before: before.type_name, after: after.type_name });
   const previous = groupBy(before.attrs, attribute => attribute.name);
   const current = groupBy(after.attrs, attribute => attribute.name);
   const body = new Set([...bodyAttributes(before, ""), ...bodyAttributes(after, "")].map(attribute => attribute.name));
@@ -245,19 +253,15 @@ function compareFields(before, after, common) {
     const old = previous.get(name), next = current.get(name);
     if (matchingFieldValues(old, next)) continue;
     const oldContent = fieldContent(old), newContent = fieldContent(next);
-    if (oldContent.signature === newContent.signature) continue;
-    const field = { name: body.has(name) ? "正文 · " + name : name, before: oldContent.text, after: newContent.text };
-    if (field.before === field.after) {
-      field.before += "（" + old.map(attribute => attribute.kind).join(" / ") + "）";
-      field.after += "（" + next.map(attribute => attribute.kind).join(" / ") + "）";
-    }
-    changes.push(field);
+    if (fieldSignature(oldContent) === fieldSignature(newContent)) continue;
+    changes.push({ name, nameKey: (old ?? next)[0].nameKey, body: body.has(name),
+      before: oldContent, after: newContent });
   }
   return changes;
 }
 
 async function buildComparison(before, after, progress) {
-  await progress("对齐工作项");
+  await progress("Matching work items");
   const matches = pairItems(before.objects, after.objects);
   const { entries } = matches;
   const pairs = pairSpecs(before.specs, after.specs);
@@ -266,14 +270,17 @@ async function buildComparison(before, after, progress) {
   const counts = Object.fromEntries(Object.keys(compareStates).map(status => [status, 0]));
   const notes = [];
   if (pairs.some(pair => pair.before?.name !== pair.after?.name)) {
-    notes.push("规格名称或范围不同，请核对导出范围。");
+    notes.push(["Specification names or scopes differ. Check the export scope."]);
   }
-  for (const [old, next, label] of [[before, after, "仅旧版字段"], [after, before, "仅新版字段"]]) {
+  for (const [old, next, label] of [
+    [before, after, "Fields only in the older file (excluded from comparison): {0}"],
+    [after, before, "Fields only in the newer file (excluded from comparison): {0}"],
+  ]) {
     const names = [...old.fieldNames].filter(name => !next.fieldNames.has(name) && !identityFields.has(name)).sort();
-    if (names.length) notes.push(label + "（不计为工作项修改）：" + names.join("、"));
+    if (names.length) notes.push([label, names.join(", ")]);
   }
 
-  await progress("对比工作项", 0, entries.length);
+  await progress("Comparing work items", 0, entries.length);
   for (const entry of entries) {
     const { before: old, after: next } = entry;
     if (!old) entry.status = "added";
@@ -283,22 +290,32 @@ async function buildComparison(before, after, progress) {
       entry.status = entry.fields.length ? "modified" : "unchanged";
     }
     counts[entry.status]++;
-    await progress("对比工作项", entry.index + 1, entries.length);
+    await progress("Comparing work items", entry.index + 1, entries.length);
   }
-  if (counts.removed) notes.push(oldOnlyNote);
-  if (entries.some(entry => entry.duplicateId)) notes.push(duplicateIdNote);
+  if (counts.removed) notes.push([oldOnlyNote]);
+  if (entries.some(entry => entry.duplicateId)) notes.push([duplicateIdNote]);
   return { before, after, entries, ...outline, counts, notes, changesOnly: false, filter: "" };
 }
 
 function comparisonFields(entry) {
   const { before, after } = entry;
-  if (before && after) return entry.fields;
+  if (before && after) return entry.fields.map(field => {
+    const format = field.nameKey === "Work item type" ? typeCaption : fieldText;
+    let previous = format(field.before);
+    let current = format(field.after);
+    if (previous === current && Array.isArray(field.before) && Array.isArray(field.after)) {
+      previous += " (" + field.before.map(([kind]) => kind).join(" / ") + ")";
+      current += " (" + field.after.map(([kind]) => kind).join(" / ") + ")";
+    }
+    const name = localName(field);
+    return { name: field.body ? translate("Body") + " · " + name : name, before: previous, after: current };
+  });
   const fields = [];
   const item = after ?? before;
   const field = (name, text) => ({ name, before: before ? text : null, after: after ? text : null });
-  if (item.title) fields.push(field("标题", item.title));
+  if (item.title) fields.push(field(translate("Title"), item.title));
   for (const [name, attributes] of groupBy(item.attrs, attribute => attribute.name)) {
-    if (!identityFields.has(name)) fields.push(field(name, fieldContent(attributes).text));
+    if (!identityFields.has(name)) fields.push(field(localName(attributes[0]), fieldText(fieldContent(attributes))));
   }
   return fields;
 }
@@ -312,7 +329,7 @@ function compareTextParts(before, after) {
     while (end < length - start && before.at(-1 - end) === after.at(-1 - end)) end++;
     if (/[\uDC00-\uDFFF]/.test(before[before.length - end] ?? "")) end--;
   }
-  const split = value => value === null ? ["", "未提供", ""] :
+  const split = value => value === null ? ["", translate("Not provided"), ""] :
     [value.slice(0, start), value.slice(start, value.length - end), value.slice(value.length - end)];
   return [split(before), split(after)];
 }
